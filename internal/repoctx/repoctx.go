@@ -1,7 +1,7 @@
 // Package repoctx builds the repository context for the teaching app that
 // gets handed to the agents, in two passes:
 //
-//   - Index: the file tree plus the content of each SPEC.md/CLAUDE.md.
+//   - Index: the file tree plus the content of each SPEC.md
 //     It's the compressed map — it grows with the repo much slower than the
 //     code, because a SPEC.md summarizes an entire folder in a few paragraphs.
 //   - Files: the full content of the specific paths an agent asked for
@@ -21,8 +21,8 @@ import (
 	"github.com/yanai/yanai-harness/internal/config"
 )
 
-// Index returns the repository tree and the content of its SPEC.md and
-// CLAUDE.md files. It's the first thing an agent sees: enough to decide
+// Index returns the repository tree and the content of its SPEC.md
+// It's the first thing an agent sees: enough to decide
 // which code files to request with Files, without loading the code itself.
 func Index(r config.Repo) (string, error) {
 	if strings.TrimSpace(r.Path) == "" {
@@ -94,7 +94,7 @@ func Index(r config.Repo) (string, error) {
 		b.WriteString("(sin archivos que coincidan con los filtros)\n")
 	}
 	b.WriteString("```\n\n")
-	b.WriteString("## Mapa: contenido de los SPEC.md y CLAUDE.md\n\n")
+	b.WriteString("## Mapa: contenido de los SPEC.md\n\n")
 	b.WriteString("Cada SPEC.md describe su carpeta — propósito, contenido, convenciones — y " +
 		"es la fuente de verdad sobre el código, no al revés. Úsalos para decidir qué " +
 		"archivos de código pedir a continuación (formato NECESITO, ver tu instrucción).\n\n")
@@ -102,7 +102,7 @@ func Index(r config.Repo) (string, error) {
 	hadSpec := false
 	for _, a := range all {
 		base := filepath.Base(a.rel)
-		if base != "SPEC.md" && base != "CLAUDE.md" {
+		if base != "SPEC.md" {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(a.rel)))
@@ -113,7 +113,7 @@ func Index(r config.Repo) (string, error) {
 		fmt.Fprintf(&b, "### %s\n\n%s\n\n", a.rel, string(data))
 	}
 	if !hadSpec {
-		b.WriteString("_(el repositorio no tiene SPEC.md ni CLAUDE.md todavía; pide los archivos " +
+		b.WriteString("_(el repositorio no tiene SPEC.md todavía; pide los archivos " +
 			"de código que necesites a partir del árbol de arriba)_\n")
 	}
 	return b.String(), nil

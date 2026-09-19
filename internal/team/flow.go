@@ -430,8 +430,8 @@ func (r *Runner) previousDeliverables(cycle int) string {
 	return b.String()
 }
 
-// repoIndex returns the compressed repository map (tree + SPEC.md/
-// CLAUDE.md), without code. This is what 'yanai context' shows and what
+// repoIndex returns the compressed repository map (tree + SPEC.md),
+// without code. This is what 'yanai context' shows and what
 // kicks off every two-pass selection.
 func (r *Runner) repoIndex() (string, error) {
 	if os.Getenv("YANAI_NO_REPO") == "1" {
@@ -457,7 +457,7 @@ func (r *Runner) repoContextFor(ctx context.Context, role, task string) (string,
 
 	var m strings.Builder
 	m.WriteString("SELECCIONA_ARCHIVOS\n\n")
-	m.WriteString("# Índice del repositorio (estructura + SPEC.md/CLAUDE.md)\n\n")
+	m.WriteString("# Índice del repositorio (estructura + SPEC.md)\n\n")
 	m.WriteString(index)
 	m.WriteString("\n\n# Qué vas a hacer\n\n")
 	m.WriteString(task)
