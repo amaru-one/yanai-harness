@@ -1,10 +1,12 @@
 {
+  "schema_version": 2,
+
   "project": "Yanai — aplicación docente",
 
   "repo": {
     "path": "../app-docente",
     "extensions": [".go", ".svelte", ".ts", ".js", ".sql", ".html", ".css", ".md", ".json"],
-    "exclude_dirs": ["node_modules", "vendor", "dist", "build", ".svelte-kit", "testdata", "yanai-workspace"],
+    "exclude_dirs": ["yanai-ui", "node_modules", "vendor", "dist", "build", ".svelte-kit", "testdata", "yanai-workspace"],
     "priority": ["go.mod", "package.json", "README.md", "schema.sql"],
     "max_file_bytes": 24000,
     "max_bytes_total": 400000
@@ -37,14 +39,14 @@
       "prompt": "prompts/arquitecto-bd.md"
     },
     "ingeniero": {
-      "name": "Software Engineer (Go / Svelte)",
+      "name": "Software Engineer (Go — backend)",
       "model": "qwen/qwen3-coder-plus",
       "temperature": 0.2,
       "max_tokens": 16000,
       "prompt": "prompts/ingeniero.md"
     },
     "disenador": {
-      "name": "Diseñador UI/UX",
+      "name": "Diseñador UI/UX (revisión)",
       "model": "openai/gpt-5.1",
       "temperature": 0.5,
       "max_tokens": 16000,

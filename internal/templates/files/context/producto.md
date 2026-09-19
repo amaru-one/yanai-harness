@@ -3,11 +3,25 @@
 > Mantengan esta lista al día después de cada ciclo. Es lo que el Product Owner
 > usa para decidir si una petición de los docentes ya está cubierta.
 >
-> Levantado el 2026-09-18 leyendo el repositorio (`yanai-server`, `yanai-ui`) y
-> los `SPEC.md` de cada carpeta. La columna "Evidencia de uso" está vacía a
-> propósito: **todavía no hay entrevistas ni analítica**, y el alcance prohíbe
-> publicar cifras no medidas. Que algo esté construido no es evidencia de que se
-> use.
+> Levantado el 2026-09-18 y reconciliado el 2026-09-19 contra `yanai` en
+> `2d9d41d`, leyendo el repositorio y los `SPEC.md` de cada carpeta.
+>
+> **Este documento separa cuatro cosas y nunca las mezcla:**
+>
+> | | Qué es | Dónde vive |
+> |---|---|---|
+> | **Alcance previsto** | lo que decidimos construir | `alcance.md` |
+> | **Implementación observada** | lo que el código hace hoy, leído y fechado | las tablas de abajo |
+> | **Comportamiento probado** | lo que una prueba automatizada garantiza | hoy: **nada** |
+> | **Evidencia de uso** | que un docente real lo use | hoy: **nada** |
+>
+> Que algo esté construido no es evidencia de que se use. Que algo compile no es
+> evidencia de que funcione. Las dos últimas columnas están vacías a propósito y
+> el alcance prohíbe publicar cifras no medidas.
+>
+> **La ausencia de entrevistas en este checkout no es evidencia de que no
+> existan.** Si tienes notas de campo, entran por `interviews/`; hasta entonces
+> lo correcto es decir que no las tenemos a la vista, no que no las hay.
 
 ## Cómo leer esto contra el alcance
 
@@ -21,33 +35,33 @@ evidencia (assessment), criterio, o nivel de logro.
 
 ## Funcionalidades que ya existen
 
-| # | Funcionalidad | Estado | Evidencia de uso |
-|---|---------------|--------|------------------|
-| 1 | Autenticación real del docente: usuario + contraseña bcrypt, cookie de sesión HttpOnly, tabla `user_sessions`, bloqueo por intentos fallidos, expiración absoluta y por inactividad | construido | — |
-| 2 | **Captura de nota de voz** por presionar y sostener, máximo 60s, normalizada a MP3 con ffmpeg y guardada en base de datos; atada a la sesión y al estudiante que el docente tocó | construido | — |
-| 3 | **Transcripción automática** de la nota de voz al español vía OpenAI (`gpt-4o-mini-transcribe`), en cola de trabajos con reintentos; el transcrito se muestra junto al audio | construido | — |
-| 4 | Borrado suave y guardado de notas de voz, con autoguardado (sin botón de enviar) | construido | — |
-| 5 | **Registro del nivel de logro (AD/A/B/C)** por estudiante, competencia y periodo — el registro oficial MINEDU (`competency_term_levels`); solo lo escribe un acto explícito del docente | construido | — |
-| 6 | **Conclusión descriptiva** por estudiante y competencia: el docente la **escribe a mano**, con estado borrador/final | construido | — |
-| 7 | El servidor deriva **si la conclusión descriptiva es obligatoria y por qué** (`level_c`, `level_b`, `cycle_i_mandatory`, `consecutive_c`, `inclusion_support`, `optional`) a partir del nivel vigente y el grado; nunca se confía en el cliente | construido | — |
-| 8 | **Detección de C consecutivo**: si la competencia estuvo en C en dos o más periodos seguidos, la conclusión queda clasificada `consecutive_c` — obligatoria y debe justificar la falta de progreso | construido | — |
-| 9 | **Criterios de evaluación** escritos por el docente por competencia (autoría); son la vara contra la que se juzga la evidencia | construido | — |
-| 10 | **Registro de evidencia** (prueba calificada, examen de recuperación, tarea) para toda la clase o un estudiante, etiquetada con la competencia y los criterios que evidencia | construido | — |
-| 11 | Notas/marcas sobre la evidencia según `value_scale` (numérica, ordinal o ninguna), con corrección que supersede en lugar de sobrescribir (historial append-only) | construido | — |
-| 12 | Notas de práctica no oficiales (`practice_scores`), crear y eliminar | construido | — |
-| 13 | **Home: agenda del día en rejilla horaria proporcional** (1 hora = 64px, ventana 07:00–17:00), tira lunes–viernes, marcador de hora actual; cada sesión abre su pantalla de grabación | construido | — |
-| 14 | Pantalla de **área/clase**: sesiones pasadas, en curso y próximas, más criterios y evidencia de clase | construido | — |
-| 15 | Pantalla de **alumnos** de la clase, acotada a una competencia, con el nivel de cada estudiante y su conteo de evidencia | construido | — |
-| 16 | Pantalla del **estudiante para evaluar**: la evidencia del periodo con sus valores, y debajo la decisión del nivel de logro | construido | — |
-| 17 | Pantalla de **notas del estudiante** (lectura completa): registro oficial primero, luego evidencia, luego el promedio interno opcional colapsado | construido | — |
-| 18 | **Sistema interno ponderado opcional del colegio** (D.S. 009-2006-ED art. 37.4.f): esquemas, versiones, pesos, descartar-la-más-baja, políticas de redondeo y recuperación; calculado en cola y **amurallado** del registro oficial | construido | — |
-| 19 | Feed de **notificaciones** con marcar-leída y marcar-todas; distingue alertas de recordatorios | construido (solo lectura) | — |
-| 20 | Perfil del docente, y su lista "MIS CLASES" como entrada a un área sin depender de la fecha | construido | — |
-| 21 | **Multi-inquilino con RLS forzado** por colegio; toda consulta corre en transacción de inquilino | construido | — |
-| 22 | **Auditoría de acceso a datos de menores**: evento `student.read` en toda respuesta que devuelve filas identificables; tabla `events` particionada | construido | — |
-| 23 | Cola de trabajos en Postgres in-process (`SELECT … FOR UPDATE SKIP LOCKED`), con backoff exponencial; dos tipos: `grade.recompute` y `voice_note.transcribe` | construido | — |
-| 24 | Esquema de privacidad (`privacy`) para descubrir y auditar columnas con datos personales (Ley N° 29733) | construido | — |
-| 25 | Despliegue: imagen distroless, Caddy, `docker-compose.prod.yml`, CI que construye la imagen | construido | — |
+| # | Funcionalidad | Implementación observada | Comportamiento probado | Evidencia de uso |
+|---|---------------|--------------------------|------------------------|------------------|
+| 1 | Autenticación real del docente: usuario + contraseña bcrypt, cookie de sesión HttpOnly, tabla `user_sessions`, bloqueo por intentos fallidos, expiración absoluta y por inactividad | construido | ninguno | — |
+| 2 | **Captura de nota de voz** por presionar y sostener, máximo 60s, normalizada a MP3 con ffmpeg y guardada en base de datos; atada a la sesión y al estudiante que el docente tocó | construido | ninguno | — |
+| 3 | **Transcripción automática** de la nota de voz al español vía OpenAI (`gpt-4o-mini-transcribe`), en cola de trabajos con reintentos; el transcrito se muestra junto al audio | construido | ninguno | — |
+| 4 | Borrado suave y guardado de notas de voz, con autoguardado (sin botón de enviar) | construido | ninguno | — |
+| 5 | **Registro del nivel de logro (AD/A/B/C)** por estudiante, competencia y periodo — el registro oficial MINEDU (`competency_term_levels`); solo lo escribe un acto explícito del docente | construido | ninguno | — |
+| 6 | **Conclusión descriptiva** por estudiante y competencia: el docente la **escribe a mano**, con estado borrador/final | construido | ninguno | — |
+| 7 | El servidor deriva **si la conclusión descriptiva es obligatoria y por qué** (`level_c`, `level_b`, `cycle_i_mandatory`, `consecutive_c`, `inclusion_support`, `optional`) a partir del nivel vigente y el grado; nunca se confía en el cliente | construido | ninguno | — |
+| 8 | **Detección de C consecutivo**: si la competencia estuvo en C en dos o más periodos seguidos, la conclusión queda clasificada `consecutive_c` — obligatoria y debe justificar la falta de progreso | construido | ninguno | — |
+| 9 | **Criterios de evaluación** escritos por el docente por competencia (autoría); son la vara contra la que se juzga la evidencia | construido | ninguno | — |
+| 10 | **Registro de evidencia** (prueba calificada, examen de recuperación, tarea) para toda la clase o un estudiante, etiquetada con la competencia y los criterios que evidencia | construido | ninguno | — |
+| 11 | Notas/marcas sobre la evidencia según `value_scale` (numérica, ordinal o ninguna), con corrección que supersede en lugar de sobrescribir (historial append-only) | construido | ninguno | — |
+| 12 | Notas de práctica no oficiales (`practice_scores`), crear y eliminar | construido | ninguno | — |
+| 13 | **Home: agenda del día en rejilla horaria proporcional** (1 hora = 64px, ventana 07:00–17:00), tira lunes–viernes, marcador de hora actual; cada sesión abre su pantalla de grabación | construido | ninguno | — |
+| 14 | Pantalla de **área/clase**: sesiones pasadas, en curso y próximas, más criterios y evidencia de clase | construido | ninguno | — |
+| 15 | Pantalla de **alumnos** de la clase, acotada a una competencia, con el nivel de cada estudiante y su conteo de evidencia | construido | ninguno | — |
+| 16 | Pantalla del **estudiante para evaluar**: la evidencia del periodo con sus valores, y debajo la decisión del nivel de logro | construido | ninguno | — |
+| 17 | Pantalla de **notas del estudiante** (lectura completa): registro oficial primero, luego evidencia, luego el promedio interno opcional colapsado | construido | ninguno | — |
+| 18 | **Sistema interno ponderado opcional del colegio** (D.S. 009-2006-ED art. 37.4.f): esquemas, versiones, pesos, descartar-la-más-baja, políticas de redondeo y recuperación; calculado en cola y **amurallado** del registro oficial | construido | ninguno | — |
+| 19 | Feed de **notificaciones** con marcar-leída y marcar-todas; distingue alertas de recordatorios | construido (solo lectura) | ninguno | — |
+| 20 | Perfil del docente, y su lista "MIS CLASES" como entrada a un área sin depender de la fecha | construido | ninguno | — |
+| 21 | **Multi-inquilino con RLS forzado** por colegio; toda consulta corre en transacción de inquilino | construido | ninguno | — |
+| 22 | **Auditoría de acceso a datos de menores**: evento `student.read` en toda respuesta que devuelve filas identificables; tabla `events` particionada | construido | ninguno | — |
+| 23 | Cola de trabajos en Postgres in-process (`SELECT … FOR UPDATE SKIP LOCKED`), con backoff exponencial; dos tipos: `grade.recompute` y `voice_note.transcribe` | construido | ninguno | — |
+| 24 | Esquema de privacidad (`privacy`) para descubrir y auditar columnas con datos personales (Ley N° 29733) | construido | ninguno | — |
+| 25 | Despliegue: imagen distroless, Caddy, `docker-compose.prod.yml`, CI que construye la imagen | construido | ninguno | — |
 
 ## Lo que el alcance pide y todavía NO existe
 
@@ -81,9 +95,19 @@ está cubierto**, aunque suene parecido a algo de la tabla de arriba.
   propósito.
 - **Nada predictivo.** No hay proyecciones, ni banderas de riesgo, ni pronóstico
   de situación final. El subsistema predictivo se retiró completo.
-- **Un criterio nunca se califica.** El criterio es la vara, no lo que se marca;
-  no existe ruta que registre un nivel para un criterio, y no se permite añadir
-  una.
+- **Un criterio nunca recibe un nivel de logro.** El criterio es la vara, no el
+  juicio oficial. El nivel de logro de una competencia se afirma solo por acto
+  explícito del docente (`competency_term_levels`) y no se deriva de nada; no
+  existe ruta que registre un nivel de logro para un criterio y no se permite
+  añadir una.
+  Eso **no** quiere decir que un criterio no se marque. Un criterio sí lleva una
+  marca por evidencia dentro de una assessment, en `criterion_scores`: numérica
+  (`raw_value`/`max_value`) o por nivel de rúbrica (`scale_level_id`, la misma
+  escala AD/A/B/C). Las rutas existen (`POST /assessments/{id}/criterion-scores`
+  y su corrección) y están vivas. Esa marca es evidencia y nunca se agrega para
+  producir el nivel oficial.
+  ⚠️ Esa marca **no tiene cliente en `yanai-ui`**: capacidad del servidor sin
+  consumidor. Decidir construirlo o retirarlo es una pregunta abierta.
 - **El registro de calificaciones es append-only.** Una corrección supersede la
   fila anterior (`superseded_at`); nada se actualiza en sitio ni se borra.
 - **No hay asistencia en la app.** Las dos rutas de asistencia siguen vivas en el
@@ -110,19 +134,17 @@ está cubierto**, aunque suene parecido a algo de la tabla de arriba.
 
 ## Deuda conocida
 
-- **No hay pruebas automatizadas.** El servidor lo dice explícitamente: no existe
-  suite de pruebas; la compuerta de CI es `go vet` + `go build`. El alcance, en
-  su "Definición de listo", exige pruebas del esquema y del circuito de
-  generación y aprobación: hoy no se cumple.
-- **El árbol de trabajo está sucio y a medio refactor.** 18 archivos modificados
-  sin commitear, incluyendo la fusión de `00002_auth.sql` y
-  `00003_voice_notes_drop_status.sql` dentro de `00001_initial_schema.sql` y el
-  borrado de `migrations/SPEC.md`. Antes de abrir un ciclo conviene cerrar o
-  descartar ese trabajo.
-- **`yanai-server/SPEC.md` está desactualizado**: sigue describiendo
-  `00002_auth.sql` como archivo existente y declara la regla "append-only: toda
-  obra de esquema es un archivo numerado nuevo, nunca una reescritura", regla que
-  el squash en curso contradice. Hay que decidir cuál gana.
+- **No hay ninguna prueba automatizada.** Ni un solo `_test.go` en todo el
+  repositorio `yanai`; tampoco pruebas de UI. La compuerta de CI es `go vet` +
+  `go build` (`.github/workflows/ci.yml`). El alcance, en su "Definición de
+  listo", exige pruebas del esquema y del circuito de generación y aprobación:
+  hoy no se cumple. **Es la razón por la que la columna "Comportamiento probado"
+  está vacía en todas las filas de arriba.**
+- **El squash de migraciones ya está cerrado.** `migrations/` tiene un solo
+  archivo, `00001_initial_schema.sql` (~2900 líneas, 43 tablas), y
+  `migrations/SPEC.md` existe. La regla vigente es: toda obra de esquema de aquí
+  en adelante es una **migración goose numerada nueva**, nunca una reescritura
+  de la anterior.
 - **La tabla `notifications` no tiene productor.** La pantalla y las rutas de
   lectura existen; nada escribe filas. El feed está vacío por construcción.
 - **`yanai-ui` está desactualizado en el contrato de descarte de nota de voz**:
