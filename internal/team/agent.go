@@ -53,7 +53,7 @@ func (r *Runner) Run(ctx context.Context, role, message string) (string, error) 
 // wire-format contract with the (Spanish, untouched) prompt templates in
 // internal/templates/files/prompts, which instruct the LLM to emit exactly
 // these words. They are intentionally left untranslated.
-var reVerdict = regexp.MustCompile(`(?mi)^\s*VEREDICTO:\s*(NUEVO_PLAN|SUFICIENTE)\s*$`)
+var reVerdict = regexp.MustCompile(`(?mi)^\s*VEREDICTO:\s*(NUEVO_PLAN|SUFICIENTE|NO_CHANGE_NEEDED|PROPOSE_CHANGE|NEEDS_EVIDENCE|OUT_OF_SCOPE|BLOCKED_BY_BASELINE)\s*$`)
 
 // Verdict extracts the Product Owner's decision from the analysis text.
 func Verdict(text string) string {

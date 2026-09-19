@@ -156,6 +156,9 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, temp fl
 			lastErr = fmt.Errorf("openrouter did not return any response")
 			continue
 		}
+		if r.Choices[0].FinishReason == "length" {
+			return "", Usage{}, fmt.Errorf("openrouter response was truncated at the token limit")
+		}
 		text := strings.TrimSpace(r.Choices[0].Message.Content)
 		if text == "" {
 			lastErr = fmt.Errorf("the model returned empty text")

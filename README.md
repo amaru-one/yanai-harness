@@ -4,6 +4,11 @@ Un binario en Go que corre cuatro agentes sobre **OpenRouter** con tus claves.
 Todo lo que producen queda en markdown, en carpetas que puedes leer y versionar
 en git. **Nada se implementa sin que una persona apruebe el plan.**
 
+El paquete `internal/workflow` añade contratos tipados, validación de
+dependencias y estado durable SQLite para nuevos flujos. El CLI existente
+mantiene sus ciclos legibles y la compuerta humana; consulta `WORKFLOW.md` para
+los límites y la migración.
+
 ## El equipo
 
 | Rol | Identificador | Qué hace |

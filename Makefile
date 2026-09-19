@@ -1,6 +1,6 @@
 BIN := yanai
 
-.PHONY: build test fmt vet demo clean
+.PHONY: build test fmt vet race demo clean
 
 build:
 	go build -o $(BIN) ./cmd/yanai
@@ -13,6 +13,9 @@ fmt:
 
 vet:
 	go vet ./...
+
+race:
+	go test -race ./internal/workflow ./internal/team
 
 # Runs through the full flow with mock responses.
 demo: build

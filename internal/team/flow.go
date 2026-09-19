@@ -2,10 +2,13 @@ package team
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/yanai/yanai-harness/internal/config"
 	"github.com/yanai/yanai-harness/internal/repoctx"
@@ -60,13 +63,16 @@ motivo. Si una petición es valiosa pero no ahora, ponla aquí como "postergada"
 
 ## Propuesta
 Si corresponde un plan nuevo: describe QUÉ se va a construir y POR QUÉ, ligado a
-los insights. Si NO corresponde: explica por qué la app ya es suficiente para
-los docentes entrevistados.
+los insights. Si no hay evidencia suficiente, no infieras que una funcionalidad
+no se usa: declara NEEDS_EVIDENCE. Usa OUT_OF_SCOPE para una petición fuera del
+alcance y BLOCKED_BY_BASELINE si el backend no permite evaluar la propuesta.
 
 Termina el documento con exactamente una línea:
 VEREDICTO: NUEVO_PLAN
 o bien
 VEREDICTO: SUFICIENTE
+También puedes terminar con: NO_CHANGE_NEEDED, PROPOSE_CHANGE, NEEDS_EVIDENCE,
+OUT_OF_SCOPE o BLOCKED_BY_BASELINE.
 `)
 
 	text, err := r.Run(ctx, config.RolePO, m.String())
@@ -76,17 +82,16 @@ VEREDICTO: SUFICIENTE
 
 	v := Verdict(text)
 	if v == "" {
-		v = "NUEVO_PLAN"
-		text += "\n\n_(El PO no emitió veredicto explícito; se asume NUEVO_PLAN.)_\n"
+		return nil, fmt.Errorf("the Product Owner response has no valid VEREDICTO; refusing to infer a product decision")
 	}
 	st.Verdict = v
 
-	if v == "SUFICIENTE" {
+	if v == "SUFICIENTE" || v == "NO_CHANGE_NEEDED" || v == "NEEDS_EVIDENCE" || v == "OUT_OF_SCOPE" || v == "BLOCKED_BY_BASELINE" {
 		if _, err := r.Workspace.WriteDocument(st.Cycle, "02-reporte-suficiencia.md", text); err != nil {
 			return nil, err
 		}
 		st.Phase = ws.PhaseSufficient
-		st.Log("analysis: the app is sufficient", config.RolePO, "")
+		st.Log("analysis: "+v, config.RolePO, "")
 	} else {
 		if _, err := r.Workspace.WriteDocument(st.Cycle, "02-propuesta.md", text); err != nil {
 			return nil, err
@@ -223,12 +228,15 @@ o una lista de IDs separados por coma. Ordena las tareas por dependencia.`)
 	if _, err := r.Workspace.WriteDocument(st.Cycle, "04-plan.md", plan); err != nil {
 		return nil, err
 	}
+	st.PlanHash = contentHash(plan)
+	st.ScopeHash = contentHash(context_)
+	st.BaselineHash = repositoryBaseline(r.Cfg.Repo.Path)
 
 	tasks := ParseTasks(plan)
 	if len(tasks) == 0 {
 		return nil, fmt.Errorf("the PO didn't produce tasks in the expected format; check %s", filepath.Join(r.Workspace.CycleDir(st.Cycle), "04-plan.md"))
 	}
-	if err := validateTasks(tasks); err != nil {
+	if err := validateTasksForRoles(tasks, r.Cfg.Agents); err != nil {
 		return nil, err
 	}
 	st.Tasks = tasks
@@ -239,18 +247,67 @@ o una lista de IDs separados por coma. Ordena las tareas por dependencia.`)
 
 func validateTasks(ts []ws.Task) error {
 	valid := map[string]bool{config.RoleArchitect: true, config.RoleDesigner: true, config.RoleEngineer: true}
+	return validateTaskGraph(ts, valid)
+}
+
+func validateTasksForRoles(ts []ws.Task, configured map[string]config.Agent) error {
+	valid := map[string]bool{}
+	for id := range configured {
+		valid[id] = true
+	}
+	return validateTaskGraph(ts, valid)
+}
+
+func validateTaskGraph(ts []ws.Task, valid map[string]bool) error {
 	ids := map[string]bool{}
 	for _, t := range ts {
+		if t.ID == "" || ids[t.ID] {
+			return fmt.Errorf("task IDs must be unique and non-empty: %q", t.ID)
+		}
 		ids[t.ID] = true
 	}
 	for _, t := range ts {
 		if !valid[t.Owner] {
 			return fmt.Errorf("task %s has an invalid owner: %q", t.ID, t.Owner)
 		}
+		if strings.TrimSpace(t.Title) == "" || strings.TrimSpace(t.Description) == "" || len(t.Criteria) == 0 {
+			return fmt.Errorf("task %s requires a title, description, and acceptance criteria", t.ID)
+		}
 		for _, d := range t.DependsOn {
 			if !ids[d] {
 				return fmt.Errorf("task %s depends on %s, which doesn't exist", t.ID, d)
 			}
+		}
+	}
+	state := map[string]int{}
+	var visit func(string) error
+	visit = func(id string) error {
+		if state[id] == 1 {
+			return fmt.Errorf("task dependency cycle includes %s", id)
+		}
+		if state[id] == 2 {
+			return nil
+		}
+		state[id] = 1
+		for _, t := range ts {
+			if t.ID == id {
+				for _, dep := range t.DependsOn {
+					if dep == id {
+						return fmt.Errorf("task %s depends on itself", id)
+					}
+					if err := visit(dep); err != nil {
+						return err
+					}
+				}
+				break
+			}
+		}
+		state[id] = 2
+		return nil
+	}
+	for id := range ids {
+		if err := visit(id); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -266,6 +323,11 @@ func (r *Runner) Approve(note string) (*ws.State, error) {
 		return nil, fmt.Errorf("cycle %03d is in phase %q; only a plan in %q can be approved", st.Cycle, st.Phase, ws.PhaseWaiting)
 	}
 	st.Phase = ws.PhaseApproved
+	plan := r.Workspace.ReadDocument(st.Cycle, "04-plan.md")
+	if plan == "" || st.PlanHash == "" || contentHash(plan) != st.PlanHash || st.ScopeHash == "" || st.BaselineHash == "" {
+		return nil, fmt.Errorf("approval inputs are missing or changed; regenerate the plan before approval")
+	}
+	st.Approval = &ws.ApprovalBinding{Actor: "human", PlanHash: st.PlanHash, ScopeHash: st.ScopeHash, BaselineHash: st.BaselineHash, ApprovedAt: time.Now().UTC()}
 	st.Log("plan APPROVED by the human", "human", note)
 	text := fmt.Sprintf("# Aprobación\n\nEstado: APROBADO\nNota: %s\n", optional(note))
 	if _, err := r.Workspace.WriteDocument(st.Cycle, "05-aprobacion.md", text); err != nil {
@@ -304,6 +366,9 @@ func (r *Runner) Execute(ctx context.Context, onlyID string) (*ws.State, error) 
 	}
 	if st.Phase != ws.PhaseApproved && st.Phase != ws.PhaseExecuted {
 		return nil, fmt.Errorf("cycle %03d is in phase %q: nothing runs without the human's approval ('yanai approve')", st.Cycle, st.Phase)
+	}
+	if st.Approval == nil || st.Approval.PlanHash != contentHash(r.Workspace.ReadDocument(st.Cycle, "04-plan.md")) || st.Approval.ScopeHash != contentHash(r.Workspace.ReadContext()) || st.Approval.BaselineHash != repositoryBaseline(r.Cfg.Repo.Path) {
+		return st, fmt.Errorf("approval is stale or incomplete; plan, scope, or repository baseline changed")
 	}
 
 	plan := r.Workspace.ReadDocument(st.Cycle, "04-plan.md")
@@ -490,4 +555,20 @@ func optional(s string) string {
 		return "(sin nota)"
 	}
 	return s
+}
+
+func contentHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func repositoryBaseline(repo string) string {
+	if strings.TrimSpace(repo) == "" {
+		return "no-repository"
+	}
+	cmd := exec.Command("git", "-C", repo, "rev-parse", "HEAD")
+	if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+		return strings.TrimSpace(string(out))
+	}
+	return contentHash(repo)
 }

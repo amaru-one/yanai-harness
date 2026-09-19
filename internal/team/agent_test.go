@@ -68,9 +68,10 @@ func TestParseTasks(t *testing.T) {
 
 func TestVerdict(t *testing.T) {
 	cases := map[string]string{
-		"bla\nVEREDICTO: NUEVO_PLAN\n": "NUEVO_PLAN",
-		"bla\nveredicto: suficiente\n": "SUFICIENTE",
-		"no verdict anywhere here":     "",
+		"bla\nVEREDICTO: NUEVO_PLAN\n":     "NUEVO_PLAN",
+		"bla\nveredicto: suficiente\n":     "SUFICIENTE",
+		"bla\nveredicto: needs_evidence\n": "NEEDS_EVIDENCE",
+		"no verdict anywhere here":         "",
 	}
 	for input, expected := range cases {
 		if got := Verdict(input); got != expected {
@@ -156,5 +157,44 @@ DEPENDE_DE: -
 `)
 	if err := validateTasks(ts); err == nil {
 		t.Fatal("expected an error for an invalid owner")
+	}
+}
+
+func TestValidateTasksRejectsDuplicateAndCyclicIDs(t *testing.T) {
+	duplicate := `### TAREA: T-001
+RESPONSABLE: ingeniero
+TITULO: X
+DESCRIPCION: Y
+CRITERIOS:
+- z
+DEPENDE_DE: -
+### TAREA: T-001
+RESPONSABLE: ingeniero
+TITULO: X
+DESCRIPCION: Y
+CRITERIOS:
+- z
+DEPENDE_DE: -
+`
+	if err := validateTasks(ParseTasks(duplicate)); err == nil {
+		t.Fatal("expected duplicate task error")
+	}
+	cycle := `### TAREA: T-001
+RESPONSABLE: ingeniero
+TITULO: X
+DESCRIPCION: Y
+CRITERIOS:
+- z
+DEPENDE_DE: T-002
+### TAREA: T-002
+RESPONSABLE: ingeniero
+TITULO: X
+DESCRIPCION: Y
+CRITERIOS:
+- z
+DEPENDE_DE: T-001
+`
+	if err := validateTasks(ParseTasks(cycle)); err == nil {
+		t.Fatal("expected dependency cycle error")
 	}
 }
