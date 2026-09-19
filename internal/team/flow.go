@@ -29,7 +29,7 @@ func (r *Runner) Analyze(ctx context.Context, interviews string) (*ws.State, err
 
 	repo, err := r.repoContextFor(ctx, config.RolePO,
 		"Vas a leer notas de entrevistas a docentes y decidir si el producto actual "+
-			"ya las cubre (SUFICIENTE) o si hace falta un plan nuevo (NUEVO_PLAN). "+
+			"ya las cubre o si hace falta un plan nuevo. "+
 			"Necesitas ver el código de las funcionalidades que la entrevista toca, "+
 			"para no proponer algo que ya existe.\n\n# Entrevistas\n\n"+interviews)
 	if err != nil {
@@ -63,17 +63,9 @@ motivo. Si una petición es valiosa pero no ahora, ponla aquí como "postergada"
 
 ## Propuesta
 Si corresponde un plan nuevo: describe QUÉ se va a construir y POR QUÉ, ligado a
-los insights. Si no hay evidencia suficiente, no infieras que una funcionalidad
-no se usa: declara NEEDS_EVIDENCE. Usa OUT_OF_SCOPE para una petición fuera del
-alcance y BLOCKED_BY_BASELINE si el backend no permite evaluar la propuesta.
+los insights.
 
-Termina el documento con exactamente una línea:
-VEREDICTO: NUEVO_PLAN
-o bien
-VEREDICTO: SUFICIENTE
-También puedes terminar con: NO_CHANGE_NEEDED, PROPOSE_CHANGE, NEEDS_EVIDENCE,
-OUT_OF_SCOPE o BLOCKED_BY_BASELINE.
-`)
+` + verdictInstructions)
 
 	text, err := r.Run(ctx, config.RolePO, m.String())
 	if err != nil {
@@ -86,7 +78,7 @@ OUT_OF_SCOPE o BLOCKED_BY_BASELINE.
 	}
 	st.Verdict = v
 
-	if v == "SUFICIENTE" || v == "NO_CHANGE_NEEDED" || v == "NEEDS_EVIDENCE" || v == "OUT_OF_SCOPE" || v == "BLOCKED_BY_BASELINE" {
+	if IsTerminalVerdict(v) {
 		if _, err := r.Workspace.WriteDocument(st.Cycle, "02-reporte-suficiencia.md", text); err != nil {
 			return nil, err
 		}
@@ -110,7 +102,7 @@ func (r *Runner) Discuss(ctx context.Context) (*ws.State, error) {
 		return nil, err
 	}
 	if st.Phase == ws.PhaseSufficient {
-		return nil, fmt.Errorf("cycle %03d closed with verdict SUFICIENTE: there's nothing to discuss", st.Cycle)
+		return nil, fmt.Errorf("cycle %03d closed with verdict %s: there's nothing to discuss", st.Cycle, st.Verdict)
 	}
 	if st.Phase != ws.PhaseAnalyzed && st.Phase != ws.PhaseRejected {
 		return nil, fmt.Errorf("cycle %03d is in phase %q; 'discuss' only applies after 'analyze' or after a rejection", st.Cycle, st.Phase)
@@ -322,11 +314,13 @@ func (r *Runner) Approve(note string) (*ws.State, error) {
 	if st.Phase != ws.PhaseWaiting {
 		return nil, fmt.Errorf("cycle %03d is in phase %q; only a plan in %q can be approved", st.Cycle, st.Phase, ws.PhaseWaiting)
 	}
-	st.Phase = ws.PhaseApproved
+	// Validate before mutating: an approval that fails its own checks must
+	// leave the cycle exactly as it was.
 	plan := r.Workspace.ReadDocument(st.Cycle, "04-plan.md")
 	if plan == "" || st.PlanHash == "" || contentHash(plan) != st.PlanHash || st.ScopeHash == "" || st.BaselineHash == "" {
 		return nil, fmt.Errorf("approval inputs are missing or changed; regenerate the plan before approval")
 	}
+	st.Phase = ws.PhaseApproved
 	st.Approval = &ws.ApprovalBinding{Actor: "human", PlanHash: st.PlanHash, ScopeHash: st.ScopeHash, BaselineHash: st.BaselineHash, ApprovedAt: time.Now().UTC()}
 	st.Log("plan APPROVED by the human", "human", note)
 	text := fmt.Sprintf("# Aprobación\n\nEstado: APROBADO\nNota: %s\n", optional(note))

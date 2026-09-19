@@ -196,11 +196,11 @@ func mockResponse(model string, msgs []Message) string {
 	case strings.Contains(last, "CONSOLIDA EL PLAN"):
 		b.WriteString("## Plan de implementación (simulado)\n\nResumen del plan.\n\n")
 		b.WriteString("### TAREA: T-001\nRESPONSABLE: arquitecto-bd\nTITULO: Modelar evaluación formativa\nDESCRIPCION: Diseñar las tablas de competencias y calificaciones.\nCRITERIOS:\n- Diagrama ER entregado\n- DDL ejecutable\nDEPENDE_DE: -\n\n")
-		b.WriteString("### TAREA: T-002\nRESPONSABLE: disenador\nTITULO: Maqueta de registro de notas\nDESCRIPCION: Pantalla HTML para registrar logros por competencia.\nCRITERIOS:\n- HTML autocontenido\nDEPENDE_DE: T-001\n\n")
-		b.WriteString("### TAREA: T-003\nRESPONSABLE: ingeniero\nTITULO: Endpoint de calificaciones\nDESCRIPCION: API en Go y vista Svelte.\nCRITERIOS:\n- Handler con pruebas\nDEPENDE_DE: T-001\n")
+		b.WriteString("### TAREA: T-002\nRESPONSABLE: disenador\nTITULO: Revisar el recorrido de registro\nDESCRIPCION: Revisar los pasos que da el docente para registrar una nota de voz y señalar dónde se pierde. Sin archivos de frontend.\nCRITERIOS:\n- Pasos contados desde la pantalla de inicio\nDEPENDE_DE: T-001\n\n")
+		b.WriteString("### TAREA: T-003\nRESPONSABLE: ingeniero\nTITULO: Endpoint de calificaciones\nDESCRIPCION: Handler chi y consultas pgx en yanai-server.\nCRITERIOS:\n- Handler con pruebas\nDEPENDE_DE: T-001\n")
 	case strings.Contains(last, "ANALIZA LAS ENTREVISTAS"):
-		b.WriteString("## Insights (simulado)\n\n- Los docentes pierden tiempo transcribiendo notas al SIAGIE.\n\n")
-		b.WriteString("## Propuesta\n\nAgregar exportación a SIAGIE.\n\nVEREDICTO: NUEVO_PLAN\n")
+		b.WriteString("## Insights (simulado)\n\n- Los docentes repiten a mano la conclusión descriptiva de cada estudiante.\n\n")
+		b.WriteString("## Propuesta\n\nPartir de las notas de voz ya registradas para redactar un borrador.\n\nVEREDICTO: PROPOSE_CHANGE\n")
 	default:
 		b.WriteString("Comentario simulado del agente sobre la propuesta recibida.\n")
 	}

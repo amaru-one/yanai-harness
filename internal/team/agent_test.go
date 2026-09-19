@@ -68,14 +68,55 @@ func TestParseTasks(t *testing.T) {
 
 func TestVerdict(t *testing.T) {
 	cases := map[string]string{
-		"bla\nVEREDICTO: NUEVO_PLAN\n":     "NUEVO_PLAN",
-		"bla\nveredicto: suficiente\n":     "SUFICIENTE",
-		"bla\nveredicto: needs_evidence\n": "NEEDS_EVIDENCE",
-		"no verdict anywhere here":         "",
+		"bla\nVEREDICTO: NUEVO_PLAN\n":          "NUEVO_PLAN",
+		"bla\nveredicto: suficiente\n":          "SUFICIENTE",
+		"bla\nveredicto: needs_evidence\n":      "NEEDS_EVIDENCE",
+		"bla\nVEREDICTO: PROPOSE_CHANGE\n":      "PROPOSE_CHANGE",
+		"bla\nVEREDICTO: NO_CHANGE_NEEDED\n":    "NO_CHANGE_NEEDED",
+		"bla\nVEREDICTO: OUT_OF_SCOPE\n":        "OUT_OF_SCOPE",
+		"bla\nVEREDICTO: BLOCKED_BY_BASELINE\n": "BLOCKED_BY_BASELINE",
+		"no verdict anywhere here":              "",
+		"bla\nVEREDICTO: ALGO_INVENTADO\n":      "",
 	}
 	for input, expected := range cases {
 		if got := Verdict(input); got != expected {
 			t.Errorf("Verdict(%q) = %q, expected %q", input, got, expected)
+		}
+	}
+}
+
+// A cycle closes without a plan on four distinct findings plus the legacy
+// SUFICIENTE. Only NO_CHANGE_NEEDED/SUFICIENTE claims the product is enough,
+// so the CLI and the flow must agree on the set — they read it from here.
+func TestIsTerminalVerdict(t *testing.T) {
+	terminal := []string{
+		VerdictNoChangeNeeded, VerdictNeedsEvidence, VerdictOutOfScope,
+		VerdictBlockedByBaseline, VerdictLegacySufficient,
+		"needs_evidence", // the parser upper-cases, but callers may not
+	}
+	for _, v := range terminal {
+		if !IsTerminalVerdict(v) {
+			t.Errorf("IsTerminalVerdict(%q) = false, expected true", v)
+		}
+	}
+	for _, v := range []string{VerdictProposeChange, VerdictLegacyNewPlan, "", "ALGO_INVENTADO"} {
+		if IsTerminalVerdict(v) {
+			t.Errorf("IsTerminalVerdict(%q) = true, expected false", v)
+		}
+	}
+}
+
+// Every verdict the parser accepts must be classified by exactly one of the
+// two lists, or a new verdict could silently take the proposal branch.
+func TestEveryVerdictIsClassified(t *testing.T) {
+	for _, v := range append(append([]string{}, ChangeVerdicts...), TerminalVerdicts...) {
+		if got := Verdict("VEREDICTO: " + v); got != v {
+			t.Errorf("Verdict did not accept the declared verdict %q (got %q)", v, got)
+		}
+	}
+	for _, v := range ChangeVerdicts {
+		if IsTerminalVerdict(v) {
+			t.Errorf("%q is in ChangeVerdicts but reports as terminal", v)
 		}
 	}
 }
