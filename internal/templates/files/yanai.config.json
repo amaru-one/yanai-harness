@@ -1,0 +1,54 @@
+{
+  "project": "Yanai — aplicación docente",
+
+  "repo": {
+    "path": "../app-docente",
+    "extensions": [".go", ".svelte", ".ts", ".js", ".sql", ".html", ".css", ".md", ".json"],
+    "exclude_dirs": ["node_modules", "vendor", "dist", "build", ".svelte-kit", "testdata", "yanai-workspace"],
+    "priority": ["go.mod", "package.json", "README.md", "schema.sql"],
+    "max_file_bytes": 24000,
+    "max_bytes_total": 400000
+  },
+
+  "openrouter": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "referer": "https://github.com/yanai/yanai-harness",
+    "title": "Yanai - agent team",
+    "timeout_seconds": 600,
+    "retries": 3
+  },
+
+  "discussion_order": ["arquitecto-bd", "disenador", "ingeniero"],
+
+  "agents": {
+    "product-owner": {
+      "name": "Product Owner",
+      "model": "anthropic/claude-opus-5",
+      "temperature": 0.3,
+      "max_tokens": 12000,
+      "prompt": "prompts/product-owner.md"
+    },
+    "arquitecto-bd": {
+      "name": "Arquitecto de BD (CNEB / MINEDU)",
+      "model": "google/gemini-2.5-pro",
+      "temperature": 0.2,
+      "max_tokens": 16000,
+      "prompt": "prompts/arquitecto-bd.md"
+    },
+    "ingeniero": {
+      "name": "Software Engineer (Go / Svelte)",
+      "model": "qwen/qwen3-coder-plus",
+      "temperature": 0.2,
+      "max_tokens": 16000,
+      "prompt": "prompts/ingeniero.md"
+    },
+    "disenador": {
+      "name": "Diseñador UI/UX",
+      "model": "openai/gpt-5.1",
+      "temperature": 0.5,
+      "max_tokens": 16000,
+      "prompt": "prompts/disenador.md"
+    }
+  }
+}
