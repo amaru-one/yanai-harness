@@ -121,3 +121,15 @@ type ErrStaleVersion struct {
 func (e *ErrStaleVersion) Error() string {
 	return fmt.Sprintf("%s state changed since it was read (expected version %d); reload and retry", e.Kind, e.Expected)
 }
+
+// ErrLegacyRecord means the row was written by ImportLegacyCycle or
+// ImportLegacyTicket, not by a live transition, and no mutating method will
+// ever act on it — regardless of what its phase or status happens to say.
+type ErrLegacyRecord struct {
+	Kind string // "cycle" | "ticket"
+	ID   string
+}
+
+func (e *ErrLegacyRecord) Error() string {
+	return fmt.Sprintf("%s %s is an imported legacy record and cannot be transitioned", e.Kind, e.ID)
+}

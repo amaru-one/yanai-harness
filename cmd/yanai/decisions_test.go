@@ -330,6 +330,12 @@ func TestDiscussRejectsMalformedPlanAndChangedSource(t *testing.T) {
 	}
 }
 
+// A file-era cycle (predating any store ever being attached to this
+// workspace, simulated here with a bare ws.Open) stays inspectable via
+// 'status', but every store-backed command refuses until it is explicitly
+// imported with 'yanai import --legacy' — including 'analyze' opening an
+// unrelated new cycle, since the point is that nothing quietly works around
+// an unverified cycle sitting there unexamined.
 func TestLegacyCyclesAreInspectibleButNeedExplicitReintake(t *testing.T) {
 	harness, _, workspace := siblings(t)
 	t.Chdir(harness)
@@ -341,13 +347,13 @@ func TestLegacyCyclesAreInspectibleButNeedExplicitReintake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := w.NewCycle()
+	st, err := w.NewCycle(workflow.Product)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Phase = ws.PhaseWaiting
 	st.Verdict = "NUEVO_PLAN"
-	if err := w.SaveState(st); err != nil {
+	if err := w.SaveState(st, workflow.ActorEngine); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmdStatus([]string{"--ws", workspace}); err != nil {
@@ -357,6 +363,15 @@ func TestLegacyCyclesAreInspectibleButNeedExplicitReintake(t *testing.T) {
 		t.Fatalf("legacy approval: %v", err)
 	}
 	put(t, filepath.Join(workspace, "cycles/001/00-entrada.md"), "Reviewed imported need.")
+	if err := cmdAnalyze(analyzeArgs(workspace, filepath.Join(workspace, "cycles/001/00-entrada.md"))); err == nil || !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("analyze should refuse while an unimported legacy cycle exists: %v", err)
+	}
+	if err := cmdImport([]string{"--ws", workspace, "--legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdImport([]string{"--ws", workspace, "--legacy"}); err != nil {
+		t.Fatalf("a second import should be a no-op, not an error: %v", err)
+	}
 	if err := cmdAnalyze(analyzeArgs(workspace, filepath.Join(workspace, "cycles/001/00-entrada.md"))); err != nil {
 		t.Fatal(err)
 	}

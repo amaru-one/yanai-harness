@@ -6,6 +6,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -34,11 +37,12 @@ USAGE
 COMMANDS
   init      [--repo path]   Creates or upgrades the workspace (config, prompts, context)
   analyze --privacy-reviewed <file|->   Validate reviewed evidence and decide direction
-  discuss                   Team working session and the PO's consolidated plan
-  status                    Shows where the current cycle stands
+  discuss   [--retry-unresolved]   Team working session and the PO's consolidated plan
+  status    [--json] [--attempts]   Shows where the current cycle stands
   approve   [--note ...]    Human gate: authorizes implementation
   reject    --note "..."    Sends the plan back to the team with a reason
-  run       [--task ID]     Runs the approved tasks (only after 'approve')
+  run       [--task ID] [--retry-unresolved]   Runs the approved tasks (only after 'approve')
+  import    --legacy         Imports file-era cycles into the workflow store, read-only
   context   [--files a,b]   Prints the repo index (or specific files)
 
 GLOBAL OPTIONS
@@ -88,6 +92,8 @@ func run() error {
 		return cmdReject(args)
 	case "run":
 		return cmdRun(args)
+	case "import":
+		return cmdImport(args)
 	case "context":
 		return cmdContext(args)
 	default:
@@ -225,28 +231,108 @@ func printTemplateResults(results []templates.Result, fromVersion int) {
 	}
 }
 
-func openWorkspace(path string) (*team.Runner, error) {
-	cfg, err := config.Load(path)
+// openWorkspace is the entry point for every command that reads or mutates
+// cycle state: it binds the application repository, attaches this
+// workspace's workflow store (creating it on first use), and returns a
+// cleanup func the caller must defer. Attaching the store also takes the
+// workspace writer lock for the returned Runner's lifetime, reconciles any
+// claim or attempt left behind by a process that died, and refuses outright
+// if file-era cycles exist that this workspace has never imported — see
+// attachStore. It also binds an OpenRouter client, so it requires an API key
+// (or YANAI_MOCK=1) even for a command that turns out not to call a model —
+// analyze, discuss and run all do. Approve and Reject never do, and use
+// bindWorkspace instead so the human gate doesn't need a key to operate.
+func openWorkspace(path string) (*team.Runner, func(), error) {
+	r, cleanup, err := bindWorkspace(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	target, err := repository.Open(cfg.Repo, path)
+	cli, err := openrouter.New(r.Cfg)
 	if err != nil {
-		return nil, err
-	}
-	cfg.Repo.Path = target.Root
-	w, err := ws.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	cli, err := openrouter.New(cfg)
-	if err != nil {
-		return nil, err
+		cleanup()
+		return nil, nil, err
 	}
 	if cli.IsMock() {
 		fmt.Fprintln(os.Stderr, "⚠  YANAI_MOCK=1: mock responses, OpenRouter is not being called.")
 	}
-	return &team.Runner{Cfg: cfg, Client: cli, Workspace: w}, nil
+	r.Client = cli
+	return r, cleanup, nil
+}
+
+// bindWorkspace does everything openWorkspace does except bind a model
+// provider: config, repository binding, and the workflow store (creating it
+// on first use, reconciling abandoned claims/attempts, refusing unimported
+// legacy cycles). Used directly by approve/reject, which never call a model
+// and so must not require an API key just to record a human decision.
+func bindWorkspace(path string) (*team.Runner, func(), error) {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	target, err := repository.Open(cfg.Repo, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg.Repo.Path = target.Root
+	w, err := ws.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup, err := attachStore(w, cfg, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &team.Runner{Cfg: cfg, Workspace: w}, cleanup, nil
+}
+
+// attachStore opens (creating if needed) w's workflow.db, takes the
+// workspace writer lock for the duration, and reconciles what a dead
+// process may have left behind: an expired ticket claim goes back to
+// pending, and an attempt still marked in_flight is stamped unknown — cost
+// unknown, never assumed zero — for run/discuss to refuse on
+// (checkUnresolvedAttempts) until the operator explicitly acknowledges it.
+//
+// Unless allowLegacy, it also refuses when this workspace has file-era
+// cycles no one has run 'yanai import --legacy' on yet: letting most
+// commands quietly work around them is what would let an unverified
+// pre-Step-5 cycle drift back into the live flow unnoticed.
+func attachStore(w *ws.Workspace, cfg *config.Config, allowLegacy bool) (func(), error) {
+	unlock, err := w.LockWriter()
+	if err != nil {
+		return nil, err
+	}
+	project := strings.TrimSpace(cfg.Project)
+	if project == "" {
+		project = filepath.Base(w.Root)
+	}
+	store, err := workflow.OpenStore(filepath.Join(w.Root, "workflow.db"), project)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	w.Store = store
+	cleanup := func() { store.Close(); unlock() }
+
+	if !allowLegacy {
+		legacy, err := w.LegacyCycles()
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		if len(legacy) > 0 {
+			cleanup()
+			return nil, fmt.Errorf("%d legacy, file-era cycle(s) predate this workspace's store and are not yet imported (%v); run: yanai import --legacy", len(legacy), legacy)
+		}
+	}
+	if _, err := store.ExpireClaims(); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if _, err := store.ReconcileAttempts(); err != nil {
+		cleanup()
+		return nil, err
+	}
+	return cleanup, nil
 }
 
 func withContext() (context.Context, context.CancelFunc) {
@@ -317,10 +403,11 @@ func cmdAnalyze(args []string) error {
 		return err
 	}
 
-	r, err := openWorkspace(*path)
+	r, cleanup, err := openWorkspace(*path)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	ctx, cancel := withContext()
 	defer cancel()
 
@@ -344,17 +431,19 @@ func cmdAnalyze(args []string) error {
 func cmdDiscuss(args []string) error {
 	fs := flag.NewFlagSet("discuss", flag.ExitOnError)
 	path := wsPath(fs)
+	retryUnresolved := fs.Bool("retry-unresolved", false, "acknowledge an interrupted prior model call (cost unknown) and proceed")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	r, err := openWorkspace(*path)
+	r, cleanup, err := openWorkspace(*path)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	ctx, cancel := withContext()
 	defer cancel()
 
-	st, err := r.Discuss(ctx)
+	st, err := r.Discuss(ctx, *retryUnresolved)
 	if err != nil {
 		return err
 	}
@@ -372,9 +461,17 @@ func cmdDiscuss(args []string) error {
 	return nil
 }
 
+// cmdStatus is deliberately the one command that keeps working with no
+// store, no valid repo binding and no live provider: it's what an operator
+// reaches for exactly when something else is broken. It attaches the store
+// best-effort (allowLegacy: status is also how a legacy, un-imported cycle
+// gets inspected in the first place) and falls back to reading state.json
+// directly whenever that isn't possible.
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	path := wsPath(fs)
+	asJSON := fs.Bool("json", false, "print the raw cycle state as JSON")
+	showAttempts := fs.Bool("attempts", false, "list unresolved model-call attempts")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -382,9 +479,29 @@ func cmdStatus(args []string) error {
 	if err != nil {
 		return err
 	}
+	if cfg, err := config.Load(*path); err == nil {
+		if cleanup, err := attachStore(w, cfg, true); err == nil {
+			defer cleanup()
+		} else {
+			fmt.Fprintf(os.Stderr, "⚠  workflow store unavailable, showing file state only: %v\n", err)
+		}
+	}
+
+	if *showAttempts {
+		return printUnresolvedAttempts(w)
+	}
+
 	st, err := w.LoadState()
 	if err != nil {
 		return err
+	}
+	if *asJSON {
+		b, err := json.MarshalIndent(st, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
 	}
 	fmt.Printf("Cycle:   %03d\n", st.Cycle)
 	fmt.Printf("Phase:   %s\n", st.Phase)
@@ -408,6 +525,30 @@ func cmdStatus(args []string) error {
 		fmt.Println(line)
 	}
 	fmt.Printf("\n%s\n", suggestion(st))
+	return nil
+}
+
+func printUnresolvedAttempts(w *ws.Workspace) error {
+	if w.Store == nil {
+		fmt.Println("No workflow store attached; nothing to report.")
+		return nil
+	}
+	unresolved, err := w.Store.UnresolvedAttempts()
+	if err != nil {
+		return err
+	}
+	if len(unresolved) == 0 {
+		fmt.Println("No unresolved attempts.")
+		return nil
+	}
+	fmt.Printf("%d unresolved attempt(s) from an interrupted process; the model call may already have been billed:\n\n", len(unresolved))
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "  ID\tCYCLE\tTICKET\tROLE\tSTARTED")
+	for _, a := range unresolved {
+		fmt.Fprintf(tw, "  %s\t%03d\t%s\t%s\t%s\n", a.ID, a.Cycle, a.TicketID, a.Role, a.StartedAt.Format("2006-01-02 15:04"))
+	}
+	tw.Flush()
+	fmt.Println("\nRerun the interrupted command with --retry-unresolved to acknowledge and proceed.")
 	return nil
 }
 
@@ -451,8 +592,8 @@ func suggestion(st *ws.State) string {
 		return "Plan rejected. To have the team redo it with your reason:  yanai discuss"
 	case ws.PhaseApproved:
 		return "Next step:  yanai run"
-	case ws.PhaseExecuted:
-		return "Cycle complete. Review entregables/ and update context/producto.md."
+	case ws.PhaseAwaitingExecution:
+		return "Every ticket has a candidate staged in entregables/. Nothing has been\napplied to yanai yet — review the candidates, then update context/producto.md.\n(Applying an approved candidate to the yanai checkout is Step 8.)"
 	default:
 		return "Next step:  yanai analyze <file>"
 	}
@@ -478,11 +619,11 @@ func cmdApprove(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	w, err := ws.Open(*path)
+	r, cleanup, err := bindWorkspace(*path)
 	if err != nil {
 		return err
 	}
-	r := &team.Runner{Workspace: w}
+	defer cleanup()
 	st, err := r.Approve(*note)
 	if err != nil {
 		return err
@@ -498,11 +639,11 @@ func cmdReject(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	w, err := ws.Open(*path)
+	r, cleanup, err := bindWorkspace(*path)
 	if err != nil {
 		return err
 	}
-	r := &team.Runner{Workspace: w}
+	defer cleanup()
 	st, err := r.Reject(*note)
 	if err != nil {
 		return err
@@ -515,17 +656,19 @@ func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	path := wsPath(fs)
 	task := fs.String("task", "", "run only this task (e.g. T-002)")
+	retryUnresolved := fs.Bool("retry-unresolved", false, "acknowledge an interrupted prior model call (cost unknown) and proceed")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	r, err := openWorkspace(*path)
+	r, cleanup, err := openWorkspace(*path)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	ctx, cancel := withContext()
 	defer cancel()
 
-	st, err := r.Execute(ctx, *task)
+	st, err := r.Execute(ctx, *task, *retryUnresolved)
 	if st != nil {
 		printTasks(st)
 		fmt.Printf("\nDeliverables in: %s\n", filepath.Join(r.Workspace.CycleDir(st.Cycle), "entregables"))
@@ -534,6 +677,102 @@ func cmdRun(args []string) error {
 		return err
 	}
 	fmt.Println("\nReview the deliverables before bringing them into the repository.")
+	return nil
+}
+
+// cmdImport records file-era cycles into the workflow store as legacy and
+// unverified: never promotable (internal/workflow's transition table gives
+// TicketLegacyUnverified no outgoing edge, and the v2 legacy marker blocks a
+// cycle transition too), but present so 'status' and cycle history see the
+// project's whole past rather than only what started after Step 5.
+func cmdImport(args []string) error {
+	fs := flag.NewFlagSet("import", flag.ExitOnError)
+	path := wsPath(fs)
+	legacy := fs.Bool("legacy", false, "import file-era cycles into the workflow store, read-only and unverified")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !*legacy {
+		return fmt.Errorf("nothing to import without --legacy")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	w, err := ws.Open(*path)
+	if err != nil {
+		return err
+	}
+	cleanup, err := attachStore(w, cfg, true)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	cycles, err := w.LegacyCycles()
+	if err != nil {
+		return err
+	}
+	if len(cycles) == 0 {
+		fmt.Println("No file-era cycles to import.")
+		return nil
+	}
+	for _, n := range cycles {
+		if err := importLegacyCycle(w, n); err != nil {
+			return fmt.Errorf("cycle %03d: %w", n, err)
+		}
+	}
+	fmt.Println("\nImported cycles are read-only: their staged deliverables were never checked and cannot be promoted.")
+	return nil
+}
+
+func importLegacyCycle(w *ws.Workspace, n int) error {
+	st, err := w.LoadCycleState(n)
+	if err != nil {
+		return err
+	}
+	origin := workflow.Product
+	if st.Intake != nil && st.Intake.Origin != "" {
+		origin = st.Intake.Origin
+	}
+	payload, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Store.ImportLegacyCycle(n, st.Phase, st.Verdict, origin, string(payload)); err != nil {
+		return err
+	}
+	for _, t := range st.Tasks {
+		tp, err := json.Marshal(t)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Store.ImportLegacyTicket(n, t.ID, t.Owner, string(tp)); err != nil {
+			return err
+		}
+	}
+	artifacts := 0
+	root := w.CycleDir(n)
+	_ = filepath.WalkDir(filepath.Join(root, "entregables"), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		data, readErr := os.ReadFile(p)
+		if readErr != nil {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return nil
+		}
+		sum := sha256.Sum256(data)
+		refID := filepath.ToSlash(rel)
+		if err := w.Store.ImportLegacyArtifact(n, refID, refID, hex.EncodeToString(sum[:])); err == nil {
+			artifacts++
+		}
+		return nil
+	})
+	fmt.Printf("Imported cycle %03d (phase=%s, %d ticket(s), %d deliverable(s)) as legacy/unverified.\n", n, st.Phase, len(st.Tasks), artifacts)
 	return nil
 }
 

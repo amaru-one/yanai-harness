@@ -51,12 +51,17 @@ func TestMigrationRefusesANewerSchema(t *testing.T) {
 
 func TestCyclePhaseTransitionIsConditionalAndActorChecked(t *testing.T) {
 	s := openTestStore(t, "yanai")
-	c, err := s.CreateCycle(1, PhaseAnalyzed, Product)
+	c, err := s.CreateCycle(1, Product)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.StateVersion != 1 {
-		t.Fatalf("state_version = %d, want 1", c.StateVersion)
+	if c.StateVersion != 1 || c.Phase != PhaseNoCycle {
+		t.Fatalf("new cycle = %+v, want no_cycle at version 1", c)
+	}
+
+	c, err = s.ApplyCyclePhase(1, PhaseAnalyzed, ActorEngine, c.StateVersion, CycleFields{}, Event{Type: "cycle.analyzed"})
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	// The model's verdict is an engine-requested transition, not a human act.
@@ -72,7 +77,7 @@ func TestCyclePhaseTransitionIsConditionalAndActorChecked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.StateVersion != 2 || c.PlanHash != "p1" {
+	if c.PlanHash != "p1" {
 		t.Fatalf("cycle after transition: %+v", c)
 	}
 
@@ -122,7 +127,7 @@ func TestOnlyAHumanReachesApprovedOrRejected(t *testing.T) {
 
 func TestTicketLifecycleClaimAndValidation(t *testing.T) {
 	s := openTestStore(t, "yanai")
-	if _, err := s.CreateCycle(1, PhaseAnalyzed, Product); err != nil {
+	if _, err := s.CreateCycle(1, Product); err != nil {
 		t.Fatal(err)
 	}
 	rec, err := s.SaveTicket(1, ticket("T-1", "ingeniero"))
@@ -170,7 +175,7 @@ func TestTicketLifecycleClaimAndValidation(t *testing.T) {
 
 func TestResponseRejectedReturnsToPendingForARetry(t *testing.T) {
 	s := openTestStore(t, "yanai")
-	s.CreateCycle(1, PhaseAnalyzed, Product)
+	s.CreateCycle(1, Product)
 	rec, _ := s.SaveTicket(1, ticket("T-1", "ingeniero"))
 	rec, _, err := s.ClaimTicket(1, "T-1", "h", time.Minute, Event{})
 	if err != nil {
@@ -199,7 +204,7 @@ func TestLegacyUnverifiedTicketHasNoOutgoingEdge(t *testing.T) {
 
 func TestClaimExpiryReturnsTicketToPending(t *testing.T) {
 	s := openTestStore(t, "yanai")
-	s.CreateCycle(1, PhaseAnalyzed, Product)
+	s.CreateCycle(1, Product)
 	s.SaveTicket(1, ticket("T-1", "ingeniero"))
 	if _, _, err := s.ClaimTicket(1, "T-1", "h", -time.Second, Event{}); err != nil {
 		// Negative TTL: the lease is already expired the instant it's taken.
@@ -226,7 +231,7 @@ func TestClaimExpiryReturnsTicketToPending(t *testing.T) {
 // rather than merely that the calls don't crash.
 func TestConcurrentClaimsProduceExactlyOneWinner(t *testing.T) {
 	s := openTestStore(t, "yanai")
-	s.CreateCycle(1, PhaseAnalyzed, Product)
+	s.CreateCycle(1, Product)
 	s.SaveTicket(1, ticket("T-1", "ingeniero"))
 
 	const holders = 8
@@ -267,7 +272,7 @@ func TestAttemptLedgerRecordsUnresolvedWorkOnRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.CreateCycle(1, PhaseAnalyzed, Product)
+	s.CreateCycle(1, Product)
 	id, err := s.BeginAttempt(AttemptInput{Cycle: 1, TicketID: "T-1", Role: "ingeniero", Kind: "role_turn", RequestHash: "r1"})
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +316,7 @@ func TestAttemptLedgerRecordsUnresolvedWorkOnRestart(t *testing.T) {
 
 func TestCompletedAttemptRecordsUsageAndIsNotReconciled(t *testing.T) {
 	s := openTestStore(t, "yanai")
-	s.CreateCycle(1, PhaseAnalyzed, Product)
+	s.CreateCycle(1, Product)
 	id, err := s.BeginAttempt(AttemptInput{Cycle: 1, Role: "ingeniero", Kind: "role_turn", RequestHash: "r1"})
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +342,7 @@ func TestCompletedAttemptRecordsUsageAndIsNotReconciled(t *testing.T) {
 
 func TestAppendEventRejectsDuplicateIdempotencyKey(t *testing.T) {
 	s := openTestStore(t, "yanai")
-	s.CreateCycle(1, PhaseAnalyzed, Product)
+	s.CreateCycle(1, Product)
 	e := Event{Type: "ticket.created", IdempotencyKey: "k-1", Actor: ActorEngine}
 	if err := s.AppendEvent(e); err != nil {
 		t.Fatal(err)
@@ -349,7 +354,7 @@ func TestAppendEventRejectsDuplicateIdempotencyKey(t *testing.T) {
 
 func TestRecordApprovalRequiresHashes(t *testing.T) {
 	s := openTestStore(t, "yanai")
-	s.CreateCycle(1, PhaseAnalyzed, Product)
+	s.CreateCycle(1, Product)
 	if err := s.RecordApproval(Approval{ID: "A-1", Cycle: 1, Actor: "human"}); err == nil {
 		t.Fatal("approval accepted without plan/scope/baseline hashes")
 	}
@@ -373,5 +378,129 @@ func TestCommandIdempotency(t *testing.T) {
 	}
 	if err := s.RecordCommand(key, "analyze", "cycle-2"); err == nil {
 		t.Fatal("a second recording of the same command key was accepted")
+	}
+}
+
+func TestMaxCycleAndListCycles(t *testing.T) {
+	s := openTestStore(t, "yanai")
+	if n, err := s.MaxCycle(); err != nil || n != 0 {
+		t.Fatalf("MaxCycle on an empty store = %d, %v, want 0", n, err)
+	}
+	s.CreateCycle(1, Product)
+	s.CreateCycle(3, Product) // gaps are fine; nothing requires contiguity
+	if n, err := s.MaxCycle(); err != nil || n != 3 {
+		t.Fatalf("MaxCycle = %d, %v, want 3", n, err)
+	}
+	cycles, err := s.ListCycles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cycles) != 2 || cycles[0].Cycle != 1 || cycles[1].Cycle != 3 {
+		t.Fatalf("ListCycles = %+v", cycles)
+	}
+}
+
+func TestSetCyclePayloadUpdatesFieldsWithoutChangingPhase(t *testing.T) {
+	s := openTestStore(t, "yanai")
+	c, err := s.CreateCycle(1, Product)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err = s.SetCyclePayload(1, c.StateVersion, ActorEngine, CycleFields{Payload: `{"intake":"recorded"}`}, Event{Type: "intake.recorded"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Phase != PhaseNoCycle || c.Payload != `{"intake":"recorded"}` || c.StateVersion != 2 {
+		t.Fatalf("cycle after SetCyclePayload = %+v", c)
+	}
+	// A stale version is refused here exactly as it is for a phase change.
+	if _, err := s.SetCyclePayload(1, 1, ActorEngine, CycleFields{}, Event{}); err == nil {
+		t.Fatal("stale version accepted by SetCyclePayload")
+	}
+}
+
+func TestSaveTicketIsIdempotentButRejectsAConflictingReplay(t *testing.T) {
+	s := openTestStore(t, "yanai")
+	s.CreateCycle(1, Product)
+	t1 := ticket("T-1", "ingeniero")
+	if _, err := s.SaveTicket(1, t1); err != nil {
+		t.Fatal(err)
+	}
+	// The exact same ticket again (a replayed discuss, or a crash-retry) is
+	// a no-op, not a primary-key collision.
+	if _, err := s.SaveTicket(1, t1); err != nil {
+		t.Fatalf("idempotent replay: %v", err)
+	}
+	// A different ticket claiming the same id and revision is a genuine
+	// conflict: the caller should have called DeleteTickets first.
+	t1.Title = "changed"
+	if _, err := s.SaveTicket(1, t1); err == nil {
+		t.Fatal("a conflicting ticket payload was silently accepted")
+	}
+}
+
+func TestListAndDeleteTickets(t *testing.T) {
+	s := openTestStore(t, "yanai")
+	s.CreateCycle(1, Product)
+	s.SaveTicket(1, ticket("T-1", "ingeniero"))
+	s.SaveTicket(1, ticket("T-2", "arquitecto-bd"))
+	tickets, err := s.ListTickets(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tickets) != 2 || tickets[0].ID != "T-1" || tickets[1].ID != "T-2" {
+		t.Fatalf("ListTickets = %+v", tickets)
+	}
+	if err := s.DeleteTickets(1); err != nil {
+		t.Fatal(err)
+	}
+	if tickets, err := s.ListTickets(1); err != nil || len(tickets) != 0 {
+		t.Fatalf("after DeleteTickets: %+v, %v", tickets, err)
+	}
+	// A revised plan can now reuse the same ticket IDs at revision 1.
+	if _, err := s.SaveTicket(1, ticket("T-1", "ingeniero")); err != nil {
+		t.Fatalf("reusing a ticket id after DeleteTickets: %v", err)
+	}
+}
+
+// TestImportedLegacyCycleCannotBeTransitionedEvenAtALiveLookingPhase is the
+// scenario the v2 migration exists for: an old cycle imported at a phase
+// that coincides with a real transition-table "from" value must not become
+// eligible for a live transition just because the string matches.
+func TestImportedLegacyCycleCannotBeTransitionedEvenAtALiveLookingPhase(t *testing.T) {
+	s := openTestStore(t, "yanai")
+	c, err := s.ImportLegacyCycle(1, PhaseApproved, "PROPOSE_CHANGE", Product, `{"legacy":true}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Legacy || c.Phase != PhaseApproved {
+		t.Fatalf("imported cycle = %+v", c)
+	}
+	var legacyErr *ErrLegacyRecord
+	if _, err := s.ApplyCyclePhase(1, PhaseAwaitingExecution, ActorEngine, c.StateVersion, CycleFields{}, Event{}); !errors.As(err, &legacyErr) {
+		t.Fatalf("ApplyCyclePhase on a legacy cycle: %v, want *ErrLegacyRecord", err)
+	}
+	if _, err := s.SetCyclePayload(1, c.StateVersion, ActorEngine, CycleFields{Payload: "x"}, Event{}); !errors.As(err, &legacyErr) {
+		t.Fatalf("SetCyclePayload on a legacy cycle: %v, want *ErrLegacyRecord", err)
+	}
+}
+
+func TestImportedLegacyTicketIsAlwaysUnverifiedAndNeverPromotable(t *testing.T) {
+	s := openTestStore(t, "yanai")
+	s.ImportLegacyCycle(1, PhaseApproved, "PROPOSE_CHANGE", Product, "{}")
+	rec, err := s.ImportLegacyTicket(1, "T-1", "ingeniero", `{"status":"done"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Legacy || rec.Status != TicketLegacyUnverified {
+		t.Fatalf("imported ticket = %+v", rec)
+	}
+	for _, to := range []string{TicketPending, TicketClaimed, TicketCandidateReady} {
+		if _, err := s.ApplyTicketStatus(1, "T-1", to, ActorEngine, rec.StateVersion, Event{}); err == nil {
+			t.Fatalf("legacy ticket was promoted to %s", to)
+		}
+	}
+	if _, _, err := s.ClaimTicket(1, "T-1", "holder", time.Minute, Event{}); err == nil {
+		t.Fatal("a legacy ticket was claimed")
 	}
 }
