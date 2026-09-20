@@ -193,14 +193,39 @@ the currently broken CI are excluded. Local validation does not claim CI is gree
 
 Location: harness intake, contracts, PO prompt, and CLI. Owners: Product Owner and Engineer.
 
-- [ ] Preserve interview source identity, date, revision/hash, and excerpt references; distinguish direct statements, interpretations, and unanswered questions. Redact personal identifiers before external model calls without losing local traceability.
-- [ ] Link each product proposal to evidence and versioned scope requirements. Permit explicitly labelled technical-enabler tickets for baseline or engine work without fabricating teacher demand.
-- [ ] Use validated structured proposals and tickets in `analyze` and `discuss`. Enforce supported schema versions, nonblank acceptance criteria, known role IDs, unique IDs, valid dependencies, allowed paths, and required inputs/outputs.
-- [ ] Give `NO_CHANGE_NEEDED`, `PROPOSE_CHANGE`, `NEEDS_EVIDENCE`, `OUT_OF_SCOPE`, and `BLOCKED_BY_BASELINE` distinct persisted states and CLI next actions. Missing evidence must never be reported as proof that the product is sufficient.
-- [ ] Replace regex parsing as the authority for new machine decisions. Keep human-readable rendering and deliberate legacy import support. Refuse ambiguous or invalid results after a bounded correction attempt.
-- [ ] Test absent and contradictory evidence, unsupported quotations, out-of-scope requests, malformed responses, duplicate/cyclic dependencies, and a valid technical-enabler ticket through the actual CLI path.
+- [x] Preserve interview source identity, date, revision/hash, and excerpt references; distinguish direct statements, interpretations, and unanswered questions. Redact personal identifiers before external model calls without losing local traceability.
+- [x] Link each product proposal to evidence and versioned scope requirements. Permit explicitly labelled technical-enabler tickets for baseline or engine work without fabricating teacher demand.
+- [x] Use validated structured proposals and tickets in `analyze` and `discuss`. Enforce supported schema versions, nonblank acceptance criteria, known role IDs, unique IDs, valid dependencies, allowed paths, and required inputs/outputs.
+- [x] Give `NO_CHANGE_NEEDED`, `PROPOSE_CHANGE`, `NEEDS_EVIDENCE`, `OUT_OF_SCOPE`, and `BLOCKED_BY_BASELINE` distinct persisted states and CLI next actions. Missing evidence must never be reported as proof that the product is sufficient.
+- [x] Replace regex parsing as the authority for new machine decisions. Keep human-readable rendering and deliberate legacy import support. Refuse ambiguous or invalid results after a bounded correction attempt.
+- [x] Test absent and contradictory evidence, unsupported quotations, out-of-scope requests, malformed responses, duplicate/cyclic dependencies, and a valid technical-enabler ticket through the actual CLI path.
 
-**Exit:** every executable ticket has a validated origin and contract; uncertainty survives the complete CLI flow.
+**Exit:** met on 2026-09-20. New cycles require `--privacy-reviewed`; retain source
+hash, redacted revision, interview date when known, local source ID, numbered
+excerpts, and the versioned scope snapshot. The original intake stays local with
+0600 permissions; only the redacted public source is sent to the provider.
+
+`analyze` and `discuss` now use version-1 JSON proposals and tickets as the
+machine contract. The Markdown files are review projections and are not parsed
+back into executable tasks. Exact citations, scope/input revisions, finding
+types, ticket ownership, backend allowed paths, output declarations, dependency
+graphs, attempts, and criteria are checked before persistence. Product tickets
+must be grounded in citations; an explicit `--technical-enabler` input carries
+engineering rationale instead of invented teacher demand.
+
+The five outcomes have separate phases and CLI next actions. Empty evidence
+becomes `NEEDS_EVIDENCE` without a provider call. Contradictions, invented
+quotes, unknown references/roles, duplicate keys or IDs, cycles, invalid paths,
+unsupported schema, and malformed output receive one bounded correction attempt;
+failure leaves no executable proposal. Legacy cycles remain inspectable but are
+read-only and must be explicitly re-imported into a new reviewed cycle.
+
+Validation: `go test ./...`, `go test -race ./...`, `go vet ./...`, `go build
+./...`, and `git diff --check` pass locally. Tests cover privacy/provenance,
+redaction leakage, empty and contradictory evidence, each terminal outcome,
+technical-enabler work, malformed/ambiguous provider output, legacy import, and
+the live CLI path. VoiceNoteTranscribe tests and CI repair remain excluded by
+the explicit project decision.
 
 ### 5. Connect durable state and recovery to the CLI
 

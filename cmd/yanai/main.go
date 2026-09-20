@@ -22,6 +22,7 @@ import (
 	"github.com/yanai/yanai-harness/internal/repository"
 	"github.com/yanai/yanai-harness/internal/team"
 	"github.com/yanai/yanai-harness/internal/templates"
+	"github.com/yanai/yanai-harness/internal/workflow"
 	"github.com/yanai/yanai-harness/internal/ws"
 )
 
@@ -32,7 +33,7 @@ USAGE
 
 COMMANDS
   init      [--repo path]   Creates or upgrades the workspace (config, prompts, context)
-  analyze   <file|->        The Product Owner reads the interviews and decides direction
+  analyze --privacy-reviewed <file|->   Validate reviewed evidence and decide direction
   discuss                   Team working session and the PO's consolidated plan
   status                    Shows where the current cycle stands
   approve   [--note ...]    Human gate: authorizes implementation
@@ -260,9 +261,26 @@ func withContext() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
+type redactionTerms []string
+
+func (r *redactionTerms) String() string { return "" }
+func (r *redactionTerms) Set(s string) error {
+	if strings.TrimSpace(s) == "" {
+		return fmt.Errorf("--redact requires a nonblank identifier")
+	}
+	*r = append(*r, s)
+	return nil
+}
+
 func cmdAnalyze(args []string) error {
 	fs := flag.NewFlagSet("analyze", flag.ExitOnError)
 	path := wsPath(fs)
+	sourceID := fs.String("source-id", "", "opaque source identifier; do not use a person's name")
+	date := fs.String("date", "", "interview date YYYY-MM-DD; omit if unknown")
+	reviewed := fs.Bool("privacy-reviewed", false, "source reviewed for personal/indirect identifiers")
+	technical := fs.Bool("technical-enabler", false, "input is an explicit engineering finding, not teacher demand")
+	var redactions redactionTerms
+	fs.Var(&redactions, "redact", "known personal identifier to remove; repeat as needed")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -283,8 +301,20 @@ func cmdAnalyze(args []string) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(text) == "" {
-		return fmt.Errorf("the interviews file is empty")
+	origin := workflow.Product
+	if *technical {
+		origin = workflow.TechnicalEnabler
+	}
+	sourceName := fs.Arg(0)
+	if sourceName != "-" {
+		sourceName, err = filepath.Abs(sourceName)
+		if err != nil {
+			return err
+		}
+	}
+	intake, err := workflow.NewIntake(text, workflow.IntakeOptions{ID: *sourceID, Name: sourceName, Date: *date, Origin: origin, PrivacyReviewed: *reviewed, Redactions: redactions})
+	if err != nil {
+		return err
 	}
 
 	r, err := openWorkspace(*path)
@@ -294,7 +324,7 @@ func cmdAnalyze(args []string) error {
 	ctx, cancel := withContext()
 	defer cancel()
 
-	st, err := r.Analyze(ctx, text)
+	st, err := r.Analyze(ctx, text, intake)
 	if err != nil {
 		return err
 	}
@@ -303,7 +333,7 @@ func cmdAnalyze(args []string) error {
 	fmt.Printf("\nCycle %03d — Product Owner verdict: %s\n", st.Cycle, st.Verdict)
 	if team.IsTerminalVerdict(st.Verdict) {
 		fmt.Printf("%s\n", verdictMeaning(st.Verdict))
-		fmt.Printf("Report: %s\n", filepath.Join(dir, "02-reporte-suficiencia.md"))
+		fmt.Printf("Report: %s\n", filepath.Join(dir, "02-propuesta.md"))
 		return nil
 	}
 	fmt.Printf("Proposal: %s\n", filepath.Join(dir, "02-propuesta.md"))
@@ -329,6 +359,10 @@ func cmdDiscuss(args []string) error {
 		return err
 	}
 	dir := r.Workspace.CycleDir(st.Cycle)
+	if team.IsTerminalVerdict(st.Verdict) {
+		fmt.Printf("Cycle %03d — %s\n%s\nReport: %s\n", st.Cycle, st.Verdict, verdictMeaning(st.Verdict), filepath.Join(dir, "04-plan.md"))
+		return nil
+	}
 	fmt.Printf("\nCycle %03d — plan consolidated with %d tasks.\n", st.Cycle, len(st.Tasks))
 	fmt.Printf("Discussion: %s\n", filepath.Join(dir, "03-discusion.md"))
 	fmt.Printf("Plan:       %s\n", filepath.Join(dir, "04-plan.md"))
@@ -354,6 +388,9 @@ func cmdStatus(args []string) error {
 	}
 	fmt.Printf("Cycle:   %03d\n", st.Cycle)
 	fmt.Printf("Phase:   %s\n", st.Phase)
+	if st.SchemaVersion != "1" {
+		fmt.Println("Legacy cycle: read-only. Re-import 00-entrada.md with analyze --privacy-reviewed; old deliverables remain unverified.")
+	}
 	if st.Verdict != "" {
 		fmt.Printf("Verdict: %s\n", st.Verdict)
 	}
@@ -397,6 +434,14 @@ func suggestion(st *ws.State) string {
 	switch st.Phase {
 	case ws.PhaseAnalyzed:
 		return "Next step:  yanai discuss"
+	case ws.PhaseNoChange:
+		return "No change needed: retain the positive evidence; reassess when new evidence arrives."
+	case ws.PhaseNeedsEvidence:
+		return "Collect answers to the recorded questions, then analyze the reviewed evidence in a new cycle."
+	case ws.PhaseOutOfScope:
+		return "Request is outside scope. Defer it or have the human scope owner amend scope before a new analysis."
+	case ws.PhaseBlockedBaseline:
+		return "Resolve the recorded baseline blocker, then analyze again."
 	case ws.PhaseSufficient:
 		return "Cycle closed without a plan — " + verdictMeaning(st.Verdict) +
 			"\nFor a new cycle, run 'yanai analyze' with other interviews."

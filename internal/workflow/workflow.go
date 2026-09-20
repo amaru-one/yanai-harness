@@ -46,6 +46,9 @@ type Ticket struct {
 	SchemaVersion string        `json:"schema_version"`
 	ID            string        `json:"id"`
 	Type          string        `json:"type"`
+	Title         string        `json:"title"`
+	Description   string        `json:"description"`
+	Rationale     string        `json:"rationale,omitempty"`
 	Owner         string        `json:"owner"`
 	Status        string        `json:"status"`
 	Evidence      []string      `json:"evidence,omitempty"`
@@ -67,6 +70,11 @@ type Proposal struct {
 	Evidence      []string      `json:"evidence,omitempty"`
 	Scope         []string      `json:"scope,omitempty"`
 	Summary       string        `json:"summary"`
+	Origin        string        `json:"origin"`
+	Rationale     string        `json:"rationale,omitempty"`
+	Citations     []Citation    `json:"citations"`
+	Findings      []Finding     `json:"findings"`
+	Questions     []string      `json:"questions"`
 	Tickets       []Ticket      `json:"tickets,omitempty"`
 	Inputs        []ArtifactRef `json:"inputs,omitempty"`
 }
@@ -100,7 +108,7 @@ func ValidateRoles(roles []Role) error {
 	seen := map[string]bool{}
 	for _, role := range roles {
 		id := strings.TrimSpace(role.ID)
-		if id == "" || seen[id] {
+		if !opaqueID.MatchString(role.ID) || seen[id] {
 			return fmt.Errorf("role id must be unique and non-empty: %q", role.ID)
 		}
 		if strings.TrimSpace(role.Model) == "" {
@@ -112,8 +120,8 @@ func ValidateRoles(roles []Role) error {
 }
 
 func ValidateProposal(p Proposal, roles []Role) error {
-	if p.SchemaVersion == "" || p.ID == "" {
-		return errors.New("proposal schema_version and id are required")
+	if p.SchemaVersion != "1" || strings.TrimSpace(p.ID) == "" {
+		return errors.New("proposal requires schema_version 1 and a nonblank id")
 	}
 	switch p.Outcome {
 	case OutcomeNoChange, OutcomeNeedsEvidence, OutcomeOutOfScope, OutcomeBlockedBaseline:
@@ -140,7 +148,10 @@ func ValidateTickets(tickets []Ticket, roles []Role) error {
 	}
 	ids := map[string]bool{}
 	for _, t := range tickets {
-		if t.ID == "" || ids[t.ID] {
+		if t.SchemaVersion != "1" {
+			return fmt.Errorf("ticket requires schema_version 1")
+		}
+		if strings.TrimSpace(t.ID) == "" || ids[t.ID] {
 			return fmt.Errorf("ticket id must be unique and non-empty: %q", t.ID)
 		}
 		if !owners[t.Owner] {
@@ -149,10 +160,22 @@ func ValidateTickets(tickets []Ticket, roles []Role) error {
 		if strings.TrimSpace(t.Type) == "" || len(t.Criteria) == 0 || len(t.Outputs) == 0 {
 			return fmt.Errorf("ticket %s requires type, criteria, and outputs", t.ID)
 		}
+		for _, list := range [][]string{t.Criteria, t.Outputs} {
+			for _, v := range list {
+				if strings.TrimSpace(v) == "" {
+					return fmt.Errorf("ticket %s contains a blank criterion or output", t.ID)
+				}
+			}
+		}
 		ids[t.ID] = true
 	}
 	for _, t := range tickets {
+		deps := map[string]bool{}
 		for _, dep := range t.DependsOn {
+			if deps[dep] {
+				return fmt.Errorf("ticket %s repeats dependency %s", t.ID, dep)
+			}
+			deps[dep] = true
 			if dep == t.ID {
 				return fmt.Errorf("ticket %s depends on itself", t.ID)
 			}

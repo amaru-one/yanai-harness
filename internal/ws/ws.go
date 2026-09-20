@@ -10,18 +10,24 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yanai/yanai-harness/internal/workflow"
 )
 
 // Cycle phases. The flow only advances in this order.
 const (
-	PhaseEmpty      = "no_cycle"
-	PhaseAnalyzed   = "analyzed"   // the PO produced insights and a proposal
-	PhaseSufficient = "sufficient" // the PO concluded that nothing needs to change
-	PhaseDiscussed  = "discussed"  // the team weighed in and the PO consolidated the plan
-	PhaseWaiting    = "awaiting_approval"
-	PhaseApproved   = "approved"
-	PhaseRejected   = "rejected"
-	PhaseExecuted   = "executed"
+	PhaseEmpty           = "no_cycle"
+	PhaseAnalyzed        = "analyzed"   // the PO produced insights and a proposal
+	PhaseSufficient      = "sufficient" // the PO concluded that nothing needs to change
+	PhaseNoChange        = "no_change_needed"
+	PhaseNeedsEvidence   = "needs_evidence"
+	PhaseOutOfScope      = "out_of_scope"
+	PhaseBlockedBaseline = "blocked_by_baseline"
+	PhaseDiscussed       = "discussed" // the team weighed in and the PO consolidated the plan
+	PhaseWaiting         = "awaiting_approval"
+	PhaseApproved        = "approved"
+	PhaseRejected        = "rejected"
+	PhaseExecuted        = "executed"
 )
 
 // Task is an assignment from the Product Owner to a team member.
@@ -46,17 +52,23 @@ type Event struct {
 
 // State is what lives in cycles/NNN/state.json.
 type State struct {
-	Cycle        int              `json:"cycle"`
-	Phase        string           `json:"phase"`
-	Verdict      string           `json:"verdict,omitempty"`
-	PlanHash     string           `json:"plan_hash,omitempty"`
-	ScopeHash    string           `json:"scope_hash,omitempty"`
-	BaselineHash string           `json:"baseline_hash,omitempty"`
-	Approval     *ApprovalBinding `json:"approval,omitempty"`
-	Created      time.Time        `json:"created"`
-	Updated      time.Time        `json:"updated"`
-	Tasks        []Task           `json:"tasks"`
-	History      []Event          `json:"history"`
+	SchemaVersion string             `json:"schema_version,omitempty"`
+	BaseCommit    string             `json:"base_commit,omitempty"`
+	Intake        *workflow.Intake   `json:"intake,omitempty"`
+	Scope         *workflow.Scope    `json:"scope,omitempty"`
+	Proposal      *workflow.Proposal `json:"proposal,omitempty"`
+	Plan          *workflow.Proposal `json:"plan,omitempty"`
+	Cycle         int                `json:"cycle"`
+	Phase         string             `json:"phase"`
+	Verdict       string             `json:"verdict,omitempty"`
+	PlanHash      string             `json:"plan_hash,omitempty"`
+	ScopeHash     string             `json:"scope_hash,omitempty"`
+	BaselineHash  string             `json:"baseline_hash,omitempty"`
+	Approval      *ApprovalBinding   `json:"approval,omitempty"`
+	Created       time.Time          `json:"created"`
+	Updated       time.Time          `json:"updated"`
+	Tasks         []Task             `json:"tasks"`
+	History       []Event            `json:"history"`
 }
 
 // ApprovalBinding records the exact inputs a human approved. A plan or scope
@@ -162,7 +174,7 @@ func (w *Workspace) SaveState(st *State) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(w.CycleDir(st.Cycle), "state.json"), b, 0o644)
+	return os.WriteFile(filepath.Join(w.CycleDir(st.Cycle), "state.json"), b, 0o600)
 }
 
 // Log appends an entry to the history.
@@ -186,7 +198,7 @@ func (w *Workspace) WriteDocument(cycle int, name, content string) (string, erro
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return "", err
 	}
 	return path, nil
