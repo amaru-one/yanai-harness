@@ -5,8 +5,12 @@ Las decisiones se guardan como datos validados y se muestran en Markdown para
 revisión humana. **Nada se implementa sin que una persona apruebe el plan.**
 
 El CLI usa los contratos tipados y las validaciones de `internal/workflow`.
-El estado actual sigue en `state.json`; el almacenamiento SQLite aún no está
-conectado. La durabilidad transaccional y la recuperación son Step 5.
+`workflow.db` (SQLite) es la autoridad del CLI: cada comando pasa por
+transiciones condicionales, toma el lock de escritor del workspace, y
+reconcilia al arrancar los claims de tickets abandonados, los intentos de
+llamada al modelo interrumpidos y las publicaciones de artefactos que
+quedaron a medias. `state.json` es ahora una proyección generada de lo que
+vive en `workflow.db`, no la fuente de verdad.
 
 ## El equipo
 
