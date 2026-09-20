@@ -15,7 +15,7 @@ vet:
 	go vet ./...
 
 race:
-	go test -race ./internal/workflow ./internal/team
+	go test -race -shuffle=on ./...
 
 # Runs through the full flow with mock responses.
 demo: build
