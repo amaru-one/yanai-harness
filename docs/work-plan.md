@@ -96,15 +96,60 @@ all four still share `PhaseSufficient`.
 
 Location: `yanai/yanai-server`. Owners: Engineer and DB Architect; human resolves migration lifecycle questions.
 
-- [ ] Confirm which databases matter and whether any contain valuable data or applied older migration histories. Keep the current single-migration fresh-install path where appropriate; provide a forward upgrade path where required. Never infer authorization to reset an existing database.
-- [ ] Use a disposable PostgreSQL instance and deterministic populated fixtures: at least two tenants, two teachers in one tenant, classes, students, terms, competencies, criteria, and representative evidence. Keep fixtures synthetic.
-- [ ] Exercise the current migration and supported upgrade paths, permissions, constraints, and handwritten queries under the actual `yanai_app` role. Compilation alone is not acceptance for SQL changes.
-- [ ] Add focused integration tests in the existing `db`, `repo`, `httpapi`, and relevant worker packages. Cover login/session resolution, tenant isolation, same-tenant teacher authorization, roster/evidence reads, numeric/rubric scoring, score correction history, and explicit competency/conclusion writes.
-- [ ] Reproduce and fix the sampled class-authorization gap according to the agreed ownership/sharing contract. Check analogous resource routes rather than assuming tenant RLS enforces teacher ownership.
-- [ ] Exercise voice-note creation, transactional job enqueueing, transcription outcomes with a fake provider, and grade recomputation without altering official competency levels. Record the existing no-recovery behavior for abandoned `running` jobs; fix it before a selected increment depends on recovery.
-- [ ] Reconcile relevant SQL, Go code, comments, and SPECs based on these results. Ensure database tests report skipped prerequisites visibly and cannot yield a false successful baseline.
+- [x] Confirm which databases matter and whether any contain valuable data or applied older migration histories. Keep the current single-migration fresh-install path where appropriate; provide a forward upgrade path where required. Never infer authorization to reset an existing database.
+- [x] Use a disposable PostgreSQL instance and deterministic populated fixtures: at least two tenants, two teachers in one tenant, classes, students, terms, competencies, criteria, and representative evidence. Keep fixtures synthetic.
+- [x] Exercise the current migration and supported upgrade paths, permissions, constraints, and handwritten queries under the actual `yanai_app` role. Compilation alone is not acceptance for SQL changes.
+- [x] Add focused integration tests in the existing `db`, `repo`, `httpapi`, and relevant worker packages. Cover login/session resolution, tenant isolation, same-tenant teacher authorization, roster/evidence reads, numeric/rubric scoring, score correction history, and explicit competency/conclusion writes.
+- [x] Reproduce and fix the sampled class-authorization gap according to the agreed ownership/sharing contract. Check analogous resource routes rather than assuming tenant RLS enforces teacher ownership.
+- [x] Exercise voice-note creation, transactional job enqueueing, transcription outcomes with a fake provider, and grade recomputation without altering official competency levels. Record the existing no-recovery behavior for abandoned `running` jobs; fix it before a selected increment depends on recovery.
+  *Done except the fake provider, which was superseded by an explicit decision to keep `internal/stt` without a provider interface. Only the permanent-failure branch is reachable offline and it is covered; the untestable paths are recorded in that package's Open Questions. See the exit note.*
+- [x] Reconcile relevant SQL, Go code, comments, and SPECs based on these results. Ensure database tests report skipped prerequisites visibly and cannot yield a false successful baseline.
 
-**Exit:** reproducible fresh-install and applicable upgrade checks, populated database tests, and build/vet pass at an identified source revision. Supported behavior and residual limitations are explicit in existing specifications.
+**Exit:** met on 2026-09-20, at `yanai` `ffb672a` plus the two PRs below. The
+suite runs against a throwaway PostgreSQL 16 created, migrated and dropped per
+run, under the real `yanai_app` role, and CI runs it on every push with
+`-race -shuffle=on`.
+
+**Migration lifecycle, verified rather than inferred:** the local `yanai-pg`
+database was checked and is empty — 44 tables at goose v1, zero rows anywhere,
+confirmed as superuser so RLS was not hiding anything. `00001` is a squash and
+the only migration there has ever been, so any database anywhere is either
+empty or at v1: no older history can exist and no forward upgrade path is
+needed. No deployed database was touched, and the tests never touch an existing
+one — they create their own.
+
+**The sampled authorization gap was systemic, not one route.** Every
+`{classID}`/`{sessionID}`/`{studentID}`/`{assessmentID}`/`{voiceNoteID}`/`{scoreID}`
+route was missing the check — about 30 of them. Any teacher could read any
+colleague's roster and evidence, fetch any voice note's audio, discard a
+colleague's recording, and assert official niveles de logro for classes they
+had never taught. Closed behind one shared guard over `class_teachers`; the
+assigned / same-school-unassigned / other-school matrix is under test, and the
+tests were checked against the bug by neutralising the guard and watching 24 of
+them go red.
+
+Recorded, not fixed, as this step directs: an abandoned `running` job does not
+merely get lost. `jobs_unique_key_idx` includes `'running'`, so with no reaper
+a worker dying mid-job blocks that dedup key **permanently** — every later
+`grade.recompute` for that student/class/term is silently dropped. Two tests
+demonstrate it and the SPEC now says so.
+
+Residual limitations, all explicit in the relevant SPECs:
+
+- The transcription **success and transient-retry paths are untested** and
+  cannot be tested as things stand: `VoiceNoteTranscribe` takes a concrete
+  `*stt.Client` with a const endpoint. Only the permanent-failure branch is
+  reachable offline. Keeping `internal/stt` free of a provider interface was a
+  decision; the cost is recorded in its Open Questions.
+- Voice-note creation over HTTP needs ffmpeg on `PATH` (installed in CI). The
+  handler is tested below that layer.
+- `go test` prints `ok` for an all-skipped package, so the loud skip is visible
+  under `-v` and in CI logs, not in a bare `go test ./...`. CI always sets
+  `YANAI_TEST_ADMIN_URL`, which is the actual guarantee against a false
+  baseline.
+
+Delivered as amaru-one/yanai#3 (the baseline) and #4 (the authorization fix,
+which depends on it).
 
 ### 3. Bind the harness to the sibling Yanai repository
 

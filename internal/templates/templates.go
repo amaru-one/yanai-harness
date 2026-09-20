@@ -28,7 +28,7 @@ var embedded embed.FS
 // TemplateVersion is bumped whenever the embedded files change in a way users
 // should be told about. It is recorded in the manifest so an upgrade can be
 // reported as a version step rather than an unexplained set of diffs.
-const TemplateVersion = 2
+const TemplateVersion = 3
 
 // ManifestName is the record init leaves in the workspace. It is what makes
 // "you edited this" distinguishable from "we changed this".
