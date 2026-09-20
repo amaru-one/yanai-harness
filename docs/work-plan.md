@@ -155,14 +155,39 @@ which depends on it).
 
 Location: harness configuration, CLI initialization, repository context, and execution preflight. Owner: Engineer.
 
-- [ ] Make the target explicit: for this project it resolves to `<parent>/yanai`, with the Go module at `yanai-server`. Remove the misleading `../app-docente` default and replace literal JSON string replacement with structured configuration updates.
-- [ ] Define path semantics: resolve `init --repo` from the invocation directory, then store a canonical location; resolve relative configured paths from the configuration file's directory. Invocation from another directory must not change the target.
-- [ ] Validate the actual Git root, expected module, allowed paths, and repository identity. Fail if the target is missing or points at the harness. Never substitute a hash of an invalid path for a source baseline.
-- [ ] Separate the harness workspace for engine state from the application repository for code changes. Exclude `yanai-ui`, secrets, Git internals, and unrelated files from model-visible context and application writes.
-- [ ] Require a clean target baseline before starting a mutating cycle and take a single-writer lock. Planning may inspect dirty state if labelled. Do not stash, discard, or overwrite user edits automatically.
-- [ ] Test sibling layout, different invocation directories, existing workspace configuration, wrong targets, symlink escapes, and dirty checkout behavior using temporary repositories.
+- [x] Make the target explicit: for this project it resolves to `<parent>/yanai`, with the Go module at `yanai-server`. Remove the misleading `../app-docente` default and replace literal JSON string replacement with structured configuration updates.
+- [x] Define path semantics: resolve `init --repo` from the invocation directory, then store a canonical location; resolve relative configured paths from the configuration file's directory. Invocation from another directory must not change the target.
+- [x] Validate the actual Git root, expected module, allowed paths, and repository identity. Fail if the target is missing or points at the harness. Never substitute a hash of an invalid path for a source baseline.
+- [x] Separate the harness workspace for engine state from the application repository for code changes. Exclude `yanai-ui`, secrets, Git internals, and unrelated files from model-visible context and application writes.
+- [x] Require a clean target baseline before starting a mutating cycle and take a single-writer lock. Planning may inspect dirty state if labelled. Do not stash, discard, or overwrite user edits automatically.
+- [x] Test sibling layout, different invocation directories, existing workspace configuration, wrong targets, symlink escapes, and dirty checkout behavior using temporary repositories.
 
-**Exit:** every repository operation resolves to the intended Yanai checkout; no application file can be silently routed into the harness workspace.
+**Exit:** met on 2026-09-20 for repository binding and execution preflight.
+`init` recognizes the sibling layout and persists a validated canonical Git root;
+relative configuration paths resolve from the workspace. Existing configuration
+is updated structurally, preserving model choices and unknown fields. Invalid
+legacy paths require an explicit `init --repo` rather than guessing a new target.
+
+Repository context and candidate output paths share a backend-only policy.
+Planning labels dirty trees; `run` rejects them and holds a repository-wide OS
+writer lock shared across workspaces/worktrees. The baseline binds the checkout
+identity, HEAD, and cleanliness; it no longer falls back to hashing an invalid
+path. Old plans need regeneration. Full contract/content approval remains Step 7.
+
+The existing CLI source had been unintentionally excluded by the `yanai`
+`.gitignore` pattern. This step anchors that rule to the root binary and tracks
+`cmd/yanai` so the binding and its CLI tests are present in a fresh checkout.
+
+Validation uses temporary sibling repositories, mock responses and a local fake
+OpenRouter endpoint: path resolution, existing configuration, wrong targets,
+symlinks, excluded reads/outputs, dirty trees, writer contention and process exit,
+and a different checkout with the same HEAD. Local harness checks: `go test
+./...`, `go test -race ./...`, `go vet ./...`, and `go build ./...`.
+
+Step 8 still owns actual patch application: the current CLI stages candidates
+for review and does not apply them to Yanai. No backend or UI files were changed.
+As explicitly requested on 2026-09-20, VoiceNoteTranscribe testing and repair of
+the currently broken CI are excluded. Local validation does not claim CI is green.
 
 ### 4. Make interview evidence and structured decisions part of the live flow
 

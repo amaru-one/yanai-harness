@@ -5,19 +5,22 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/yanai/yanai-harness/internal/config"
 	"github.com/yanai/yanai-harness/internal/repoctx"
+	"github.com/yanai/yanai-harness/internal/repository"
 	"github.com/yanai/yanai-harness/internal/ws"
 )
 
 // Analyze opens a new cycle: the PO reads the interviews and decides
 // whether a new plan is needed or the app already covers what teachers need.
 func (r *Runner) Analyze(ctx context.Context, interviews string) (*ws.State, error) {
+	if _, err := repository.Open(r.Cfg.Repo, r.Workspace.Root); err != nil {
+		return nil, err
+	}
 	st, err := r.Workspace.NewCycle()
 	if err != nil {
 		return nil, err
@@ -97,6 +100,14 @@ los insights.
 // Discuss runs the working session: each specialist weighs in on the
 // proposal after seeing what the others said, and the PO consolidates the plan.
 func (r *Runner) Discuss(ctx context.Context) (*ws.State, error) {
+	target, err := repository.Open(r.Cfg.Repo, r.Workspace.Root)
+	if err != nil {
+		return nil, err
+	}
+	baseline, err := target.Snapshot()
+	if err != nil {
+		return nil, err
+	}
 	st, err := r.Workspace.LoadState()
 	if err != nil {
 		return nil, err
@@ -222,7 +233,14 @@ o una lista de IDs separados por coma. Ordena las tareas por dependencia.`)
 	}
 	st.PlanHash = contentHash(plan)
 	st.ScopeHash = contentHash(context_)
-	st.BaselineHash = repositoryBaseline(r.Cfg.Repo.Path)
+	current, err := target.Snapshot()
+	if err != nil {
+		return nil, err
+	}
+	if baseline.Baseline() != current.Baseline() {
+		return nil, fmt.Errorf("repository changed during planning; run discuss again")
+	}
+	st.BaselineHash = baseline.Baseline()
 
 	tasks := ParseTasks(plan)
 	if len(tasks) == 0 {
@@ -354,6 +372,22 @@ func (r *Runner) Reject(note string) (*ws.State, error) {
 
 // Execute runs the approved tasks, in dependency order.
 func (r *Runner) Execute(ctx context.Context, onlyID string) (*ws.State, error) {
+	if os.Getenv("YANAI_NO_REPO") == "1" {
+		return nil, fmt.Errorf("run requires repository context; unset YANAI_NO_REPO")
+	}
+	target, err := repository.Open(r.Cfg.Repo, r.Workspace.Root)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := target.LockWriter()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	baseline, err := target.Snapshot()
+	if err != nil {
+		return nil, err
+	}
 	st, err := r.Workspace.LoadState()
 	if err != nil {
 		return nil, err
@@ -361,7 +395,7 @@ func (r *Runner) Execute(ctx context.Context, onlyID string) (*ws.State, error) 
 	if st.Phase != ws.PhaseApproved && st.Phase != ws.PhaseExecuted {
 		return nil, fmt.Errorf("cycle %03d is in phase %q: nothing runs without the human's approval ('yanai approve')", st.Cycle, st.Phase)
 	}
-	if st.Approval == nil || st.Approval.PlanHash != contentHash(r.Workspace.ReadDocument(st.Cycle, "04-plan.md")) || st.Approval.ScopeHash != contentHash(r.Workspace.ReadContext()) || st.Approval.BaselineHash != repositoryBaseline(r.Cfg.Repo.Path) {
+	if st.Approval == nil || st.Approval.PlanHash != contentHash(r.Workspace.ReadDocument(st.Cycle, "04-plan.md")) || st.Approval.ScopeHash != contentHash(r.Workspace.ReadContext()) || st.Approval.BaselineHash != baseline.Baseline() {
 		return st, fmt.Errorf("approval is stale or incomplete; plan, scope, or repository baseline changed")
 	}
 
@@ -421,8 +455,8 @@ en un bloque con este formato exacto:
 <contenido completo del archivo, sin cercas de código>
 === FIN ARCHIVO ===
 
-Las rutas son relativas y describen dónde debería vivir el archivo en el
-repositorio. No escribas rutas absolutas ni "..". Entrega archivos completos,
+Las rutas son relativas a la raíz Git de Yanai y deben empezar con yanai-server/.
+No generes yanai-ui ni archivos del harness. No escribas rutas absolutas ni "..". Entrega archivos completos,
 nunca fragmentos con "resto igual".`)
 
 		resp, err := r.Run(ctx, t.Owner, m.String())
@@ -430,6 +464,19 @@ nunca fragmentos con "resto igual".`)
 			return st, err
 		}
 
+		// Validate raw paths before the legacy extractor can normalize them.
+		for _, match := range reFile.FindAllStringSubmatch(resp, -1) {
+			if err := target.CheckPath(match[1]); err != nil {
+				return st, fmt.Errorf("task %s output: %w", t.ID, err)
+			}
+		}
+		current, err := target.Snapshot()
+		if err != nil {
+			return st, err
+		}
+		if current.Baseline() != baseline.Baseline() {
+			return st, fmt.Errorf("repository changed during run; refusing to save stale deliverables")
+		}
 		dir := filepath.Join("entregables", t.Owner, t.ID)
 		if _, err := r.Workspace.WriteDocument(st.Cycle, filepath.Join(dir, "respuesta.md"), resp); err != nil {
 			return st, err
@@ -554,15 +601,4 @@ func optional(s string) string {
 func contentHash(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return fmt.Sprintf("%x", sum[:])
-}
-
-func repositoryBaseline(repo string) string {
-	if strings.TrimSpace(repo) == "" {
-		return "no-repository"
-	}
-	cmd := exec.Command("git", "-C", repo, "rev-parse", "HEAD")
-	if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
-		return strings.TrimSpace(string(out))
-	}
-	return contentHash(repo)
 }

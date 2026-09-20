@@ -61,21 +61,46 @@ go build -o yanai ./cmd/yanai
 sudo mv yanai /usr/local/bin/     # o déjalo donde quieras
 ```
 
-Sin dependencias externas. Go 1.24 o superior.
+Go 1.24 o superior y Git en `PATH`. La compuerta de ejecución usa bloqueos
+del sistema operativo en macOS y Linux.
 
 ## Puesta en marcha
 
 ```bash
-yanai init --repo /ruta/a/yanai --ws ./yanai-workspace
+cd /ruta/a/yanai-harness
+yanai init --ws ./yanai-workspace   # descubre ../yanai y guarda la ruta canónica
 export OPENROUTER_API_KEY=sk-or-...
 ```
+
+Los dos repositorios viven al mismo nivel:
+
+```text
+proyectos/
+  yanai-harness/
+    yanai-workspace/        configuración y estado del equipo
+  yanai/
+    yanai-server/           módulo Go de la aplicación
+    yanai-ui/              fuera de alcance
+```
+
+También puedes indicar `yanai init --repo ../yanai --ws ./yanai-workspace`.
+`--repo` se resuelve desde el directorio donde invocas el comando. El valor
+guardado es absoluto y canónico. Si editas `repo.path` a mano para usar una ruta
+relativa, se resuelve desde la carpeta de `yanai.config.json`, nunca desde el
+directorio del siguiente comando. Desde otro directorio, pasa el mismo `--ws`.
+
+Sin `--repo`, un workspace existente conserva su destino. Para uno nuevo se
+busca el checkout hermano desde el directorio de invocación o el del binario;
+si no se reconoce el layout, `init` pide una ruta explícita. El destino debe ser
+la raíz Git de Yanai y contener `yanai-server/go.mod` con módulo `yanai-server`.
+El workspace no puede contener el destino ni estar dentro de él.
 
 Antes del primer ciclo, edita dos archivos. Son los que hacen la diferencia
 entre un equipo útil y uno que inventa:
 
-- **`contexto/alcance.md`** — la vara con la que el PO rechaza propuestas. Si
+- **`context/alcance.md`** — la vara con la que el PO rechaza propuestas. Si
   está vacío, el PO no puede proteger nada.
-- **`contexto/producto.md`** — qué existe hoy en la app. Es lo que el PO usa
+- **`context/producto.md`** — qué existe hoy en la app. Es lo que el PO usa
   para decidir si una petición del docente ya está cubierta.
 
 Actualiza `producto.md` al cerrar cada ciclo.
@@ -141,6 +166,26 @@ verificaciones corridas ahí y revisión independiente antes de darla por
 terminada. Mientras el ejecutor controlado no exista, mover los archivos a mano
 es el paso que falta — y revisarlos antes de moverlos sigue siendo tuyo.
 
+El enlace de Step 3 ya valida que las rutas de los archivos candidatos
+pertenezcan al backend. Rechaza rutas absolutas, `..`, enlaces simbólicos,
+archivos ignorados, rutas ocultas y archivos de credenciales reconocibles,
+incluido `.env`. El índice y las lecturas explícitas comparten esa política;
+pedir un archivo con `context --files` no evita los filtros.
+
+`run` exige un checkout limpio (también sin archivos no rastreados), y toma un
+bloqueo exclusivo en los metadatos Git durante toda la ejecución. Workspaces
+distintos y worktrees del mismo repositorio comparten el bloqueo. Al terminar
+el proceso se libera, incluso si murió; el archivo del bloqueo se conserva y
+no se debe borrar para desbloquear una ejecución activa. El harness nunca hace
+stash, reset ni limpieza de tus cambios.
+
+La planificación puede leer un checkout sucio, pero lo marca `DIRTY` y esa base
+no permite ejecutar. Tras resolver los cambios, vuelve a generar y aprobar el
+plan. La base incluye la identidad local del checkout, HEAD y su estado de
+limpieza: cambiar a otro clon con el mismo commit también invalida la base.
+Los planes anteriores a Step 3 deben regenerarse. El contrato completo de
+aprobación y el ejecutor de patches siguen pendientes en Steps 7 y 8.
+
 ## Cómo se actualiza un workspace existente
 
 `yanai init` se puede volver a correr sobre un workspace que ya existe. Compara
@@ -162,13 +207,22 @@ este binario te entregó la última vez (anotada en
 este mecanismo no tiene manifiesto: en ese caso se asume que editaste todo y no
 se toca nada.
 
+La excepción explícita es `init --repo`: cambia únicamente `repo.path` mediante
+JSON estructurado, conserva modelos y campos desconocidos, y también repara
+configuraciones antiguas con `../app-docente`. Sin ese argumento, una ruta
+antigua inválida produce un error; no se sustituye por otro repositorio por
+suposición. Un `init` normaliza a ruta canónica el destino ya configurado.
+
 ## Configuración
 
 `yanai.config.json`:
 
 - `schema_version` — la generación de plantillas con que se creó el workspace.
-- `repo.path` — ruta al repositorio de la app docente. El valor por defecto de
-  la plantilla (`../app-docente`) está obsoleto: pásale `--repo` en el `init`.
+- `repo.path` — raíz Git de la aplicación, enlazada por `init`. La plantilla
+  embebida la deja vacía hasta que se valida el destino.
+- `repo.allowed_paths` — por defecto `AGENTS.md` y `yanai-server`. Puede acotar
+  estos caminos; en esta etapa no puede ampliarlos al frontend u otros proyectos.
+  Las configuraciones anteriores que omiten el campo reciben el mismo límite.
 - `repo.extensions`, `repo.exclude_dirs`, `repo.priority` — qué ve el equipo.
   `yanai-ui` viene excluido: el frontend está fuera de alcance en esta etapa.
 - `repo.max_bytes_total` — tope del contexto. Súbelo si tu repo crece y tu
@@ -185,7 +239,7 @@ Variables de entorno:
 |----------|----------|
 | `OPENROUTER_API_KEY` | tu clave |
 | `YANAI_MOCK=1` | simula respuestas, no llama a la API |
-| `YANAI_NO_REPO=1` | omite la lectura del repositorio |
+| `YANAI_NO_REPO=1` | omite contexto al planificar; no evita validar el destino y está prohibido en `run` |
 | `YANAI_WS` | espacio de trabajo por defecto |
 
 ## Cosas que conviene saber

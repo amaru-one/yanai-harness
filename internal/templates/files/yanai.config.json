@@ -1,13 +1,14 @@
 {
-  "schema_version": 2,
+  "schema_version": 4,
 
   "project": "Yanai — aplicación docente",
 
   "repo": {
-    "path": "../app-docente",
-    "extensions": [".go", ".svelte", ".ts", ".js", ".sql", ".html", ".css", ".md", ".json"],
+    "path": "",
+    "allowed_paths": ["AGENTS.md", "yanai-server"],
+    "extensions": [".go", ".sql", ".md", ".json", ".mod", ".sum", ".yaml", ".yml"],
     "exclude_dirs": ["yanai-ui", "node_modules", "vendor", "dist", "build", ".svelte-kit", "testdata", "yanai-workspace"],
-    "priority": ["go.mod", "package.json", "README.md", "schema.sql"],
+    "priority": ["AGENTS.md", "go.mod", "README.md", "Dockerfile"],
     "max_file_bytes": 24000,
     "max_bytes_total": 400000
   },
