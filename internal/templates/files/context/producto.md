@@ -134,12 +134,17 @@ está cubierto**, aunque suene parecido a algo de la tabla de arriba.
 
 ## Deuda conocida
 
-- **No hay ninguna prueba automatizada.** Ni un solo `_test.go` en todo el
-  repositorio `yanai`; tampoco pruebas de UI. La compuerta de CI es `go vet` +
-  `go build` (`.github/workflows/ci.yml`). El alcance, en su "Definición de
-  listo", exige pruebas del esquema y del circuito de generación y aprobación:
-  hoy no se cumple. **Es la razón por la que la columna "Comportamiento probado"
-  está vacía en todas las filas de arriba.**
+- **El backend ya tiene pruebas; la UI no.** Desde el 2026-09-20 `yanai-server`
+  corre una suite contra un PostgreSQL 16 desechable, bajo el rol real
+  `yanai_app`, y CI la ejecuta en cada push con `-race -shuffle=on`. Cubre el
+  aislamiento por colegio, la autorización por clase, el protocolo de
+  supersesión de notas, las reglas de las marcas por criterio, que un nivel de
+  logro no se deriva de nada, el login y la resolución de sesión, la cola de
+  trabajos y el recálculo interno. `yanai-ui` sigue **sin ninguna prueba**.
+  La columna "Comportamiento probado" de la tabla de arriba sigue vacía a
+  propósito: dice qué garantiza una prueba *para esa funcionalidad*, y la suite
+  cubre contratos transversales, no una fila por pantalla. Llenarla exige
+  pruebas por funcionalidad, que todavía no existen.
 - **El squash de migraciones ya está cerrado.** `migrations/` tiene un solo
   archivo, `00001_initial_schema.sql` (~2900 líneas, 43 tablas), y
   `migrations/SPEC.md` existe. La regla vigente es: toda obra de esquema de aquí
@@ -156,9 +161,11 @@ está cubierto**, aunque suene parecido a algo de la tabla de arriba.
   salta.
 - **No hay segador de arrendamientos** en la cola: un trabajo cuyo worker muere
   se queda en `running`; hay que diagnosticarlo por `attempted_by`/`attempted_at`.
-- **Nada lee `grade_scales.passing_value` ni `grade_scale_levels.is_passing`.**
-  Ambos codificaban "nota 11 aprobatoria", vigente solo para Secundaria en 2020;
-  las columnas siguen en el esquema sin uso.
+- **`grade_scales.passing_value` y `grade_scale_levels.is_passing` ya no
+  existen.** Codificaban "nota 11 aprobatoria", vigente solo para Secundaria en
+  2020, y fueron retiradas del esquema; esta nota decía que seguían ahí sin uso,
+  y es falso (verificado el 2026-09-20 contra el esquema real). "Aprobado" no es
+  una propiedad de un nivel de logro: AD/A/B/C no llevan nota.
 - **La sesión no rota por petición**, solo se emite al iniciar sesión, para
   evitar cierres intermitentes cuando el layout dispara `/me` y el sondeo de
   notificaciones en paralelo.
