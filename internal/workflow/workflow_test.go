@@ -98,21 +98,22 @@ func TestSafeRelativePath(t *testing.T) {
 }
 
 func TestArtifactStorePublishesImmutablyAndDetectsTampering(t *testing.T) {
-	store := ArtifactStore{Root: t.TempDir()}
-	ref, err := store.Publish(ArtifactRef{ID: "a-1", Path: "artifacts/one.md", Version: "1"}, []byte("hello"))
+	s := openTestStore(t, "yanai")
+	afs := ArtifactStore{Root: t.TempDir()}
+	ref, err := afs.Publish(s, 1, ArtifactRef{ID: "a-1", Path: "artifacts/one.md", Version: "1"}, []byte("hello"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Publish(ref, []byte("changed")); err == nil {
+	if _, err := afs.Publish(s, 1, ref, []byte("changed")); err == nil {
 		t.Fatal("overwrote immutable artifact")
 	}
-	if got, err := store.Read(ref); err != nil || string(got) != "hello" {
+	if got, err := afs.Read(s, 1, ref.ID); err != nil || string(got) != "hello" {
 		t.Fatalf("read=%q err=%v", got, err)
 	}
-	if err := os.WriteFile(filepath.Join(store.Root, "artifacts/one.md"), []byte("tampered"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(afs.Root, "artifacts/one.md"), []byte("tampered"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Read(ref); err == nil {
+	if _, err := afs.Read(s, 1, ref.ID); err == nil {
 		t.Fatal("tampered artifact accepted")
 	}
 }

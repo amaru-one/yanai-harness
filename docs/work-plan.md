@@ -231,15 +231,45 @@ the explicit project decision.
 
 Location: harness workflow store, workspace adapter, and commands. Owner: Engineer.
 
-- [ ] Adopt one authoritative workflow store for proposals, tickets, approvals, attempts, usage, and events. Connect all commands to it; stop maintaining conflicting mutable JSON and SQLite authorities.
-- [ ] Define permitted state transitions and who may request them. Use transactional conditional updates with expected versions, event recording, and task claims. An LLM response cannot directly assign a successful terminal state.
-- [ ] Scope identities to project/cycle/ticket/revision; make duplicate commands idempotent and reject conflicting replay. Prevent two CLI processes from claiming the same work.
-- [ ] Add claim expiry and restart reconciliation. For an interrupted external side effect, inspect recorded and actual state before retrying; do not assume it never happened.
-- [ ] Make immutable runtime content publication reject concurrent overwrites and bind hashes to stored references. Recover orphaned publications or pending transitions after crashes; filesystem and SQLite operations are not one atomic transaction.
-- [ ] Version storage and import old cycles explicitly. Legacy staged deliverables remain historical/unverified; never promote old `done` records to technically verified work.
-- [ ] Test the CLI across process restart, concurrent claims, interrupted publication, stale transitions, replay, and legacy import. Unit tests of disconnected helpers do not close this step.
+- [x] Adopt one authoritative workflow store for proposals, tickets, approvals, attempts, usage, and events. Connect all commands to it; stop maintaining conflicting mutable JSON and SQLite authorities.
+- [x] Define permitted state transitions and who may request them. Use transactional conditional updates with expected versions, event recording, and task claims. An LLM response cannot directly assign a successful terminal state.
+- [x] Scope identities to project/cycle/ticket/revision; make duplicate commands idempotent and reject conflicting replay. Prevent two CLI processes from claiming the same work.
+- [x] Add claim expiry and restart reconciliation. For an interrupted external side effect, inspect recorded and actual state before retrying; do not assume it never happened.
+- [x] Make immutable runtime content publication reject concurrent overwrites and bind hashes to stored references. Recover orphaned publications or pending transitions after crashes; filesystem and SQLite operations are not one atomic transaction.
+- [x] Version storage and import old cycles explicitly. Legacy staged deliverables remain historical/unverified; never promote old `done` records to technically verified work.
+- [x] Test the CLI across process restart, concurrent claims, interrupted publication, stale transitions, replay, and legacy import. Unit tests of disconnected helpers do not close this step.
 
-**Exit:** the same cycle resumes consistently after interruption, with no duplicate accepted patch or conflicting source of truth.
+**Exit:** met across three PRs against `yanai-harness`. PR 1 (#5, merged)
+built the durable store: ticket claims with lease-based expiry, an attempt
+ledger, and conditional transitions. PR 2 (#6) made `workflow.db` the CLI's
+authority — every command goes through conditional transitions, takes a
+workspace writer lock, reconciles abandoned claims and interrupted
+model-call attempts on startup, imports legacy cycles, and replays
+`analyze`/`discuss`/`approve` idempotently. PR 3 closed the one piece PR 2
+explicitly deferred: `ArtifactStore.Publish` was `Stat`-then-`Rename`, a
+real (if unexercised, since nothing called it yet) race, with no link
+between what the filesystem held and what SQLite believed. It now binds
+publication to `workflow_artifacts` via `BeginArtifact`/`PublishArtifact` —
+a plain `INSERT` against the table's existing primary key decides any race,
+the same pattern `ClaimTicket` already used — replaces the rename with
+write-temp + `os.Link` (atomic on a name collision), and folds artifact
+reconciliation into `attachStore` alongside claim/attempt reconciliation: a
+pending row with a matching file on disk is published, one with no file is
+dropped, and one with a mismatched file is left pending and reported —
+never adopted, the same rule legacy import already followed.
+
+**No migration was needed for PR 3.** `workflow_artifacts` (added in PR 1)
+already had `state`/`sha256`/`published_at` as free-form columns with no
+`CHECK` constraint, so `pending`/`published` simply joined the `legacy`
+value PR 2 already wrote there.
+
+**Entregables writes were not rerouted through `ArtifactStore`.** Nothing
+in `cmd/yanai` or `internal/team` called `ArtifactStore` before PR 3 —
+`Execute` writes entregables candidates with plain `ws.WriteDocument`,
+unrelated to this type — so PR 3 completed a capability rather than
+changing existing behavior. Routing entregables through it is future work
+for whichever step first needs atomic, store-backed publication for real
+deliverables.
 
 ### 6. Introduce bounded handoffs and extensible roles
 

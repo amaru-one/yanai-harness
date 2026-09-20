@@ -332,7 +332,51 @@ func attachStore(w *ws.Workspace, cfg *config.Config, allowLegacy bool) (func(),
 		cleanup()
 		return nil, err
 	}
+	if err := reconcileArtifacts(store, w.Root); err != nil {
+		cleanup()
+		return nil, err
+	}
 	return cleanup, nil
+}
+
+// reconcileArtifacts resolves every pending artifact left by a process that
+// died between committing the row and finishing the publish:
+//
+//	file present, hash matches    -> flip to published (the file made it,
+//	                                  only the final store write didn't)
+//	file absent                   -> drop the pending row (nothing to adopt)
+//	file present, hash mismatches -> report and leave pending; never adopt
+//
+// Never promoting an unverified file into looking authoritative mirrors the
+// same rule legacy import already follows.
+func reconcileArtifacts(store *workflow.Store, root string) error {
+	pending, err := store.PendingArtifacts()
+	if err != nil {
+		return err
+	}
+	for _, a := range pending {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(a.Path)))
+		switch {
+		case os.IsNotExist(err):
+			if err := store.DropPendingArtifact(a.Cycle, a.RefID); err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		case contentHash(data) == a.SHA256:
+			if _, err := store.PublishArtifact(a.Cycle, a.RefID, a.SHA256); err != nil {
+				return err
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "⚠  artifact %s (cycle %03d) on disk does not match its recorded hash; left pending for a human to look at\n", a.RefID, a.Cycle)
+		}
+	}
+	return nil
+}
+
+func contentHash(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 func withContext() (context.Context, context.CancelFunc) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -198,5 +199,44 @@ func TestConcurrentClaimsThroughTheCLIProduceExactlyOneWinner(t *testing.T) {
 	}
 	if wins != 1 {
 		t.Fatalf("wins = %d, want exactly 1", wins)
+	}
+}
+
+// TestArtifactReconciliationRunsThroughAttachStore proves attachStore's
+// reconciliation reaches artifact rows too, the same way
+// TestUnresolvedAttemptBlocksRunAndDiscussUntilAcknowledged proves it for
+// attempts: a pending row left by a process that died between linking the
+// file and marking it published is flipped to published the next time any
+// command opens the workspace store.
+func TestArtifactReconciliationRunsThroughAttachStore(t *testing.T) {
+	_, workspace := approvedCycle(t)
+	store := openWorkflowStore(t, workspace)
+
+	content := []byte("deliverable")
+	path := "entregables/one.md"
+	if _, err := store.BeginArtifact(1, workflow.ArtifactRef{ID: "a-1", Path: path, SHA256: contentHash(content)}); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(workspace, filepath.FromSlash(path))
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store.Close() // the "process" that would have finished the publish is gone
+
+	if err := cmdStatus([]string{"--ws", workspace}); err != nil {
+		t.Fatal(err)
+	}
+
+	store2 := openWorkflowStore(t, workspace)
+	defer store2.Close()
+	rec, err := store2.GetArtifact(1, "a-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.State != "published" {
+		t.Fatalf("artifact state = %q, want published", rec.State)
 	}
 }
