@@ -3,11 +3,13 @@ package team
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/yanai/yanai-harness/internal/config"
 	"github.com/yanai/yanai-harness/internal/repository"
@@ -37,7 +39,26 @@ func (r *Runner) Analyze(ctx context.Context, raw string, intake workflow.Intake
 	if err != nil {
 		return nil, err
 	}
-	st, err := r.Workspace.NewCycle()
+
+	// Idempotent replay: the exact same reviewed source, scope and baseline
+	// as an already-completed analyze opens no second cycle and calls no
+	// model — it returns the cycle that request already produced. A changed
+	// scope is legitimately new work, which is why scope.Revision is part
+	// of the key rather than something a replay ignores.
+	var cmdKey string
+	if r.Workspace.Store != nil {
+		cmdKey = contentHash(r.Workspace.Store.Project() + "|analyze|" + intake.OriginalHash + "|" + scope.Revision + "|" + baseline.Head)
+		if result, found, err := r.Workspace.Store.CheckCommand(cmdKey); err != nil {
+			return nil, err
+		} else if found {
+			var n int
+			if _, err := fmt.Sscanf(result, "%d", &n); err == nil {
+				return r.Workspace.LoadCycleState(n)
+			}
+		}
+	}
+
+	st, err := r.Workspace.NewCycle(intake.Origin)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +69,7 @@ func (r *Runner) Analyze(ctx context.Context, raw string, intake workflow.Intake
 	if _, err = r.Workspace.WriteDocument(st.Cycle, "00-entrada.md", raw); err != nil {
 		return nil, err
 	}
-	if err = r.Workspace.SaveState(st); err != nil {
+	if err = r.Workspace.SaveState(st, workflow.ActorEngine); err != nil {
 		return nil, err
 	}
 	r.Redactions = intake.Redactions
@@ -83,19 +104,28 @@ func (r *Runner) Analyze(ctx context.Context, raw string, intake workflow.Intake
 		return st, err
 	}
 	st.Log("validated analysis: "+st.Verdict, config.RolePO, "")
-	return st, r.Workspace.SaveState(st)
+	if err := r.Workspace.SaveState(st, workflow.ActorEngine); err != nil {
+		return st, err
+	}
+	if r.Workspace.Store != nil {
+		// Best-effort: a command record is a replay optimization, not a
+		// correctness requirement, so a failure here doesn't undo a
+		// successful analysis.
+		_ = r.Workspace.Store.RecordCommand(cmdKey, "analyze", fmt.Sprintf("%d", st.Cycle))
+	}
+	return st, nil
 }
 
-func (r *Runner) Discuss(ctx context.Context) (*ws.State, error) {
+func (r *Runner) Discuss(ctx context.Context, retryUnresolved bool) (*ws.State, error) {
+	if err := r.checkUnresolvedAttempts(retryUnresolved); err != nil {
+		return nil, err
+	}
 	st, err := r.Workspace.LoadState()
 	if err != nil {
 		return nil, err
 	}
 	if st.SchemaVersion != "1" || st.Proposal == nil {
 		return nil, fmt.Errorf("legacy cycle is read-only; re-import with analyze --privacy-reviewed")
-	}
-	if st.Phase != ws.PhaseAnalyzed && st.Phase != ws.PhaseRejected {
-		return nil, fmt.Errorf("cycle outcome %s / phase %s does not authorize discussion", st.Verdict, st.Phase)
 	}
 	target, err := repository.Open(r.Cfg.Repo, r.Workspace.Root)
 	if err != nil {
@@ -104,6 +134,31 @@ func (r *Runner) Discuss(ctx context.Context) (*ws.State, error) {
 	baseline, err := target.Snapshot()
 	if err != nil {
 		return nil, err
+	}
+
+	// Idempotent replay: the exact same proposal, scope and baseline as an
+	// already-completed discuss re-runs no specialist reviews and calls no
+	// model — it returns the plan that request already consolidated, even
+	// though the phase has since moved on to awaiting_approval and would
+	// otherwise fail the authorization check just below. A baseline that
+	// has since moved is never replayed; that's a real change, for the
+	// phase check (or validateCurrentPlan, once past it) to reject.
+	var cmdKey string
+	if r.Workspace.Store != nil {
+		proposalHash, err := workflow.Hash(*st.Proposal)
+		if err != nil {
+			return st, err
+		}
+		cmdKey = contentHash(fmt.Sprintf("%s|discuss|%d|%s|%s|%s", r.Workspace.Store.Project(), st.Cycle, proposalHash, contentHash(r.Workspace.ReadContext()), baseline.Baseline()))
+		if result, found, err := r.Workspace.Store.CheckCommand(cmdKey); err != nil {
+			return st, err
+		} else if found && result == "done" {
+			return r.Workspace.LoadCycleState(st.Cycle)
+		}
+	}
+
+	if st.Phase != ws.PhaseAnalyzed && st.Phase != ws.PhaseRejected {
+		return nil, fmt.Errorf("cycle outcome %s / phase %s does not authorize discussion", st.Verdict, st.Phase)
 	}
 	c, err := r.decisionContext(st)
 	if err != nil {
@@ -118,6 +173,7 @@ func (r *Runner) Discuss(ctx context.Context) (*ws.State, error) {
 	c.BaseCommit = baseline.Head
 	st.BaseCommit = baseline.Head
 	r.Redactions = st.Intake.Redactions
+
 	proposal := workflow.RenderProposal(*st.Proposal)
 	transcript := ""
 	for _, role := range r.Cfg.DiscussionOrder {
@@ -162,8 +218,65 @@ func (r *Runner) Discuss(ctx context.Context) (*ws.State, error) {
 	if p.Outcome == workflow.OutcomeProposeChange {
 		st.Phase = ws.PhaseWaiting
 	}
+	// A rejected plan's tickets, if any, are fully superseded here: Discuss
+	// only ever runs before approval, so nothing could have claimed or
+	// executed them yet. DeleteTickets first lets the new plan reuse the
+	// same ticket IDs at revision 1, which is what the model always emits
+	// (ValidateDecision requires it) regardless of how many times a cycle
+	// has been discussed.
+	if r.Workspace.Store != nil {
+		if err := r.Workspace.Store.DeleteTickets(st.Cycle); err != nil {
+			return st, err
+		}
+		for _, t := range p.Tickets {
+			if _, err := r.Workspace.Store.SaveTicket(st.Cycle, t); err != nil {
+				return st, err
+			}
+		}
+	}
 	st.Log("validated plan: "+st.Verdict, config.RolePO, "")
-	return st, r.Workspace.SaveState(st)
+	if err := r.Workspace.SaveState(st, workflow.ActorEngine); err != nil {
+		return st, err
+	}
+	if r.Workspace.Store != nil {
+		_ = r.Workspace.Store.RecordCommand(cmdKey, "discuss", "done")
+	}
+	return st, nil
+}
+
+// checkUnresolvedAttempts refuses to proceed while a model call from an
+// interrupted process is still unresolved: it may already have been billed,
+// and per the recorded decision this is never retried silently. With
+// retryUnresolved, the operator has explicitly acknowledged that risk, so
+// each unresolved attempt is cleared and the command proceeds — nothing
+// about the old attempt is reused; whatever ticket needed it simply gets a
+// fresh one.
+func (r *Runner) checkUnresolvedAttempts(retryUnresolved bool) error {
+	if r.Workspace.Store == nil {
+		return nil
+	}
+	unresolved, err := r.Workspace.Store.UnresolvedAttempts()
+	if err != nil {
+		return err
+	}
+	if len(unresolved) == 0 {
+		return nil
+	}
+	if !retryUnresolved {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d unresolved attempt(s) from an interrupted process; the model call may already have been billed:\n", len(unresolved))
+		for _, a := range unresolved {
+			fmt.Fprintf(&b, "  %s  cycle %03d  ticket %s  role %s  started %s\n", a.ID, a.Cycle, a.TicketID, a.Role, a.StartedAt.Format("2006-01-02 15:04"))
+		}
+		b.WriteString("Inspect: yanai status --attempts\nThen: rerun with --retry-unresolved to acknowledge and proceed.")
+		return errors.New(b.String())
+	}
+	for _, a := range unresolved {
+		if err := r.Workspace.Store.ResolveAttempt(a.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func phase(outcome workflow.Outcome) string {

@@ -9,7 +9,7 @@ import (
 // storeSchemaVersion is the ladder this binary knows how to run. OpenStore
 // refuses a database stamped with a newer version: an old binary must never
 // guess at what a newer schema's columns mean.
-const storeSchemaVersion = 1
+const storeSchemaVersion = 2
 
 // migrations are applied in order, each in its own transaction, and never
 // rewritten once released — a later version only appends. Table DDL uses
@@ -127,6 +127,18 @@ CREATE TABLE IF NOT EXISTS workflow_commands (
 	result      TEXT NOT NULL DEFAULT '',
 	created_at  TEXT NOT NULL
 );
+`,
+	// v2: a `legacy` marker on cycles and tickets. yanai import --legacy
+	// writes rows directly at whatever phase/status the old state.json had —
+	// which can coincide with a real transition-table "from" value, e.g. an
+	// old cycle sitting at "approved". Without this column, a fresh 'yanai
+	// run' could pick such a cycle up and treat an unverified, imported
+	// record as newly authorized work. Every mutating store method checks
+	// it and refuses outright when set, regardless of what the transition
+	// table would otherwise allow.
+	`
+ALTER TABLE workflow_cycles ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workflow_tickets ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0;
 `,
 }
 
