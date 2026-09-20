@@ -1,25 +1,57 @@
+// Package workflow's Store is the sole durable authority for cycle, ticket,
+// claim, attempt and event state. cmd/yanai and internal/team read and
+// mutate through it exclusively (Step 5); cycles/NNN/state.json becomes a
+// generated, labelled projection of what is read here, never the other way
+// around.
 package workflow
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-type Store struct{ db *sql.DB }
+// Store wraps one project's workflow database. Every row it reads or writes
+// is scoped to Project — see bindProject — so a workspace copied or renamed
+// onto another project's database is refused rather than silently mixing
+// state.
+type Store struct {
+	db      *sql.DB
+	path    string
+	project string
+}
 
-func OpenStore(path string) (*Store, error) {
+// OpenStore opens (creating and migrating if needed) the database at path
+// for the given project identifier.
+func OpenStore(path, project string) (*Store, error) {
+	if strings.TrimSpace(project) == "" {
+		return nil, errors.New("workflow store requires a non-empty project identifier")
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
+	// One connection: SQLite serializes writers regardless, and this makes
+	// that serialization happen predictably inside this process rather than
+	// racing the driver's pool against itself.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
-	if err := s.migrate(); err != nil {
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=10000;`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := applyMigrations(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	s := &Store{db: db, path: path, project: project}
+	if err := s.bindProject(); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -28,67 +60,319 @@ func OpenStore(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) migrate() error {
-	_, err := s.db.Exec(`PRAGMA journal_mode=WAL;
-CREATE TABLE IF NOT EXISTS workflow_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS workflow_tickets (id TEXT PRIMARY KEY, payload TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, state_version INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS workflow_approvals (id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS workflow_events (id TEXT PRIMARY KEY, ticket_id TEXT, idempotency_key TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, created_at TEXT NOT NULL);
-INSERT INTO workflow_meta(key, value) VALUES ('schema_version', '1') ON CONFLICT(key) DO NOTHING;`)
+// Project returns the identifier this store is bound to.
+func (s *Store) Project() string { return s.project }
+
+func (s *Store) bindProject() error {
+	var existing string
+	err := s.db.QueryRow(`SELECT value FROM workflow_meta WHERE key = 'project'`).Scan(&existing)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		_, err := s.db.Exec(`INSERT INTO workflow_meta(key, value) VALUES ('project', ?)`, s.project)
+		return err
+	case err != nil:
+		return err
+	case existing != s.project:
+		return fmt.Errorf("workflow store %s belongs to project %q, not %q: a workspace must not be copied or renamed onto another project's store", s.path, existing, s.project)
+	}
+	return nil
+}
+
+func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+func newID(prefix string) string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(b[:]))
+}
+
+// appendEventTx inserts e within the caller's transaction, filling ID,
+// CreatedAt and IdempotencyKey when the caller left them blank. It is the
+// only way any table's row is committed alongside its event, which is what
+// keeps the two from drifting apart.
+func (s *Store) appendEventTx(tx *sql.Tx, e Event) error {
+	if e.Type == "" {
+		return errors.New("event requires a type")
+	}
+	if e.ID == "" {
+		e.ID = newID("evt")
+	}
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = time.Now().UTC()
+	}
+	key := e.IdempotencyKey
+	if key == "" {
+		key = fmt.Sprintf("%s/%d/%s/%s/%s", s.project, e.Cycle, e.Type, e.TicketID, e.ID)
+	}
+	_, err := tx.Exec(`INSERT INTO workflow_events(id, project, cycle, ticket_id, actor, type, idempotency_key, payload, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, s.project, e.Cycle, e.TicketID, e.Actor, e.Type, key, e.Payload, e.CreatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
-func (s *Store) SaveTicket(t Ticket) error {
-	b, err := json.Marshal(t)
+// AppendEvent commits e on its own, outside any other transition. Duplicate
+// IdempotencyKey values are rejected by the column's UNIQUE constraint.
+func (s *Store) AppendEvent(e Event) error {
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`INSERT INTO workflow_tickets(id,payload,status,revision,state_version) VALUES(?,?,?,?,0)
-ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,status=excluded.status,revision=excluded.revision,state_version=workflow_tickets.state_version+1`, t.ID, string(b), t.Status, t.Revision)
-	return err
+	defer tx.Rollback() //nolint:errcheck
+	if err := s.appendEventTx(tx, e); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func (s *Store) GetTicket(id string) (Ticket, error) {
-	var payload string
-	if err := s.db.QueryRow(`SELECT payload FROM workflow_tickets WHERE id=?`, id).Scan(&payload); err != nil {
-		return Ticket{}, err
-	}
-	var t Ticket
-	if err := json.Unmarshal([]byte(payload), &t); err != nil {
-		return Ticket{}, err
-	}
-	return t, nil
+// ---- Cycles ----
+
+// CycleRecord is a cycle's durable row. Intake/Scope/Proposal/Plan live in
+// Payload as caller-defined JSON — Store does not know their shape, which is
+// what keeps this package free of an import cycle with internal/ws.
+type CycleRecord struct {
+	Project      string
+	Cycle        int
+	Phase        string
+	Verdict      string
+	Origin       string
+	BaseCommit   string
+	PlanHash     string
+	ScopeHash    string
+	BaselineHash string
+	Payload      string
+	StateVersion int64
 }
 
-func (s *Store) Approve(a Approval) error {
+// CycleFields carries the columns a phase transition may also set. A blank
+// field leaves the stored column unchanged — ApplyCyclePhase overlays these
+// onto what's already there rather than blanking columns a given transition
+// has nothing new to say about.
+type CycleFields struct {
+	Verdict, BaseCommit, PlanHash, ScopeHash, BaselineHash, Payload string
+}
+
+// CreateCycle inserts a new cycle at state_version 1. It is not itself a
+// transition — there is no prior row to compare against — but phase must
+// still be a legal destination from PhaseNoCycle, so a caller cannot conjure
+// a cycle into an arbitrary state.
+func (s *Store) CreateCycle(cycle int, phase, origin string) (CycleRecord, error) {
+	if len(allowedActors(cycleTransitions, PhaseNoCycle, phase)) == 0 {
+		return CycleRecord{}, fmt.Errorf("cannot create a cycle directly in phase %q", phase)
+	}
+	ts := now()
+	if _, err := s.db.Exec(`INSERT INTO workflow_cycles(project, cycle, phase, origin, state_version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, ?, ?)`, s.project, cycle, phase, origin, ts, ts); err != nil {
+		return CycleRecord{}, err
+	}
+	return s.GetCycle(cycle)
+}
+
+func (s *Store) GetCycle(cycle int) (CycleRecord, error) {
+	r := CycleRecord{Project: s.project, Cycle: cycle}
+	err := s.db.QueryRow(`SELECT phase, verdict, origin, base_commit, plan_hash, scope_hash, baseline_hash, payload, state_version
+		FROM workflow_cycles WHERE project = ? AND cycle = ?`, s.project, cycle).
+		Scan(&r.Phase, &r.Verdict, &r.Origin, &r.BaseCommit, &r.PlanHash, &r.ScopeHash, &r.BaselineHash, &r.Payload, &r.StateVersion)
+	return r, err
+}
+
+// ApplyCyclePhase moves a cycle from its current phase to `to`, iff the
+// stored state_version still equals expectedVersion and actor is permitted
+// to make that move. The phase change, its field updates and its event are
+// committed in one transaction.
+func (s *Store) ApplyCyclePhase(cycle int, to, actor string, expectedVersion int64, fields CycleFields, evt Event) (CycleRecord, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return CycleRecord{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var from, verdict, baseCommit, planHash, scopeHash, baselineHash, payload string
+	var version int64
+	if err := tx.QueryRow(`SELECT phase, verdict, base_commit, plan_hash, scope_hash, baseline_hash, payload, state_version
+		FROM workflow_cycles WHERE project = ? AND cycle = ?`, s.project, cycle).
+		Scan(&from, &verdict, &baseCommit, &planHash, &scopeHash, &baselineHash, &payload, &version); err != nil {
+		return CycleRecord{}, err
+	}
+	if version != expectedVersion {
+		return CycleRecord{}, &ErrStaleVersion{Kind: "cycle", Expected: expectedVersion}
+	}
+	if !actorAllowed(cycleTransitions, from, to, actor) {
+		return CycleRecord{}, &ErrTransitionNotAllowed{From: from, To: to, Actor: actor}
+	}
+	if fields.Verdict != "" {
+		verdict = fields.Verdict
+	}
+	if fields.BaseCommit != "" {
+		baseCommit = fields.BaseCommit
+	}
+	if fields.PlanHash != "" {
+		planHash = fields.PlanHash
+	}
+	if fields.ScopeHash != "" {
+		scopeHash = fields.ScopeHash
+	}
+	if fields.BaselineHash != "" {
+		baselineHash = fields.BaselineHash
+	}
+	if fields.Payload != "" {
+		payload = fields.Payload
+	}
+	res, err := tx.Exec(`UPDATE workflow_cycles SET phase = ?, verdict = ?, base_commit = ?, plan_hash = ?, scope_hash = ?, baseline_hash = ?, payload = ?, state_version = state_version + 1, updated_at = ?
+		WHERE project = ? AND cycle = ? AND state_version = ?`,
+		to, verdict, baseCommit, planHash, scopeHash, baselineHash, payload, now(), s.project, cycle, expectedVersion)
+	if err != nil {
+		return CycleRecord{}, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return CycleRecord{}, &ErrStaleVersion{Kind: "cycle", Expected: expectedVersion}
+	}
+	evt.Cycle, evt.Actor = cycle, actor
+	if evt.Type == "" {
+		evt.Type = "cycle.phase_changed:" + to
+	}
+	if err := s.appendEventTx(tx, evt); err != nil {
+		return CycleRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return CycleRecord{}, err
+	}
+	return s.GetCycle(cycle)
+}
+
+// ---- Tickets ----
+
+// TicketRecord is a ticket's durable row. Payload holds the caller's
+// marshalled Ticket for the same reason CycleRecord.Payload does.
+type TicketRecord struct {
+	Project      string
+	Cycle        int
+	ID           string
+	Revision     int
+	Owner        string
+	Status       string
+	Payload      string
+	StateVersion int64
+}
+
+// SaveTicket inserts a new ticket at revision 1 (or t.Revision, if the
+// caller set one), status pending, state_version 1.
+func (s *Store) SaveTicket(cycle int, t Ticket) (TicketRecord, error) {
+	if strings.TrimSpace(t.ID) == "" {
+		return TicketRecord{}, errors.New("ticket requires a non-empty id")
+	}
+	revision := t.Revision
+	if revision == 0 {
+		revision = 1
+	}
+	status := t.Status
+	if status == "" {
+		status = TicketPending
+	}
+	payload, err := json.Marshal(t)
+	if err != nil {
+		return TicketRecord{}, err
+	}
+	ts := now()
+	if _, err := s.db.Exec(`INSERT INTO workflow_tickets(project, cycle, id, revision, owner, status, payload, state_version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+		s.project, cycle, t.ID, revision, t.Owner, status, string(payload), ts, ts); err != nil {
+		return TicketRecord{}, err
+	}
+	return s.GetTicket(cycle, t.ID)
+}
+
+// GetTicket returns a ticket's latest revision.
+func (s *Store) GetTicket(cycle int, id string) (TicketRecord, error) {
+	r := TicketRecord{Project: s.project, Cycle: cycle, ID: id}
+	err := s.db.QueryRow(`SELECT revision, owner, status, payload, state_version FROM workflow_tickets
+		WHERE project = ? AND cycle = ? AND id = ? ORDER BY revision DESC LIMIT 1`, s.project, cycle, id).
+		Scan(&r.Revision, &r.Owner, &r.Status, &r.Payload, &r.StateVersion)
+	return r, err
+}
+
+// ApplyTicketStatus moves a ticket's latest revision from its current status
+// to `to`, under the same conditional-version and actor rules as
+// ApplyCyclePhase.
+func (s *Store) ApplyTicketStatus(cycle int, id, to, actor string, expectedVersion int64, evt Event) (TicketRecord, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return TicketRecord{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var revision int
+	var from string
+	var version int64
+	if err := tx.QueryRow(`SELECT revision, status, state_version FROM workflow_tickets
+		WHERE project = ? AND cycle = ? AND id = ? ORDER BY revision DESC LIMIT 1`, s.project, cycle, id).
+		Scan(&revision, &from, &version); err != nil {
+		return TicketRecord{}, err
+	}
+	if version != expectedVersion {
+		return TicketRecord{}, &ErrStaleVersion{Kind: "ticket", Expected: expectedVersion}
+	}
+	if !actorAllowed(ticketTransitions, from, to, actor) {
+		return TicketRecord{}, &ErrTransitionNotAllowed{From: from, To: to, Actor: actor}
+	}
+	res, err := tx.Exec(`UPDATE workflow_tickets SET status = ?, state_version = state_version + 1, updated_at = ?
+		WHERE project = ? AND cycle = ? AND id = ? AND revision = ? AND state_version = ?`,
+		to, now(), s.project, cycle, id, revision, expectedVersion)
+	if err != nil {
+		return TicketRecord{}, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return TicketRecord{}, &ErrStaleVersion{Kind: "ticket", Expected: expectedVersion}
+	}
+	evt.Cycle, evt.TicketID, evt.Actor = cycle, id, actor
+	if evt.Type == "" {
+		evt.Type = "ticket.status_changed:" + to
+	}
+	if err := s.appendEventTx(tx, evt); err != nil {
+		return TicketRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TicketRecord{}, err
+	}
+	return s.GetTicket(cycle, id)
+}
+
+// ---- Approvals ----
+
+// RecordApproval commits the human's approval. It does not itself change any
+// cycle phase — the caller pairs it with ApplyCyclePhase(..., PhaseApproved,
+// ActorHuman, ...) — but it is the durable record of who approved what.
+func (s *Store) RecordApproval(a Approval) error {
 	if a.ID == "" || a.Actor == "" || a.PlanHash == "" || a.ScopeHash == "" || a.Baseline == "" {
 		return errors.New("approval requires id, actor, plan, scope, and baseline hashes")
 	}
 	if a.ApprovedAt.IsZero() {
 		a.ApprovedAt = time.Now().UTC()
 	}
-	b, err := json.Marshal(a)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(`INSERT INTO workflow_approvals(id,payload,created_at) VALUES(?,?,?)`, a.ID, string(b), a.ApprovedAt.Format(time.RFC3339Nano))
+	_, err := s.db.Exec(`INSERT INTO workflow_approvals(id, project, cycle, actor, plan_hash, scope_hash, baseline_hash, contract_hash, approved_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, s.project, a.Cycle, a.Actor, a.PlanHash, a.ScopeHash, a.Baseline, a.ContractHash, a.ApprovedAt.Format(time.RFC3339Nano))
 	return err
 }
 
-func (s *Store) AppendEvent(e Event) error {
-	if e.ID == "" || e.IdempotencyKey == "" || e.Type == "" {
-		return errors.New("event id, type, and idempotency key are required")
+// ---- Commands (idempotent CLI invocations; wired in Step 5.7) ----
+
+// CheckCommand reports whether key was already recorded, and its result.
+func (s *Store) CheckCommand(key string) (result string, found bool, err error) {
+	err = s.db.QueryRow(`SELECT result FROM workflow_commands WHERE key = ? AND project = ?`, key, s.project).Scan(&result)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
 	}
-	if e.CreatedAt.IsZero() {
-		e.CreatedAt = time.Now().UTC()
-	}
-	b, err := json.Marshal(e)
 	if err != nil {
-		return err
+		return "", false, err
 	}
-	_, err = s.db.Exec(`INSERT INTO workflow_events(id,ticket_id,idempotency_key,payload,created_at) VALUES(?,?,?,?,?)`, e.ID, e.TicketID, e.IdempotencyKey, string(b), e.CreatedAt.Format(time.RFC3339Nano))
-	if err != nil {
-		return fmt.Errorf("append event: %w", err)
-	}
-	return nil
+	return result, true, nil
+}
+
+// RecordCommand commits key's result. A second RecordCommand for the same
+// key fails on the primary key, which is the point: a replayed command reads
+// via CheckCommand, it does not re-record.
+func (s *Store) RecordCommand(key, command, result string) error {
+	_, err := s.db.Exec(`INSERT INTO workflow_commands(key, project, command, result, created_at) VALUES (?, ?, ?, ?, ?)`,
+		key, s.project, command, result, now())
+	return err
 }

@@ -69,28 +69,10 @@ func TestReadyTicketsUsesDependencies(t *testing.T) {
 	}
 }
 
-func TestStoreIdempotencyAndApproval(t *testing.T) {
-	s, err := OpenStore(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	if err := s.SaveTicket(ticket("T-1", "ingeniero")); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := s.GetTicket("T-1"); err != nil || got.ID != "T-1" {
-		t.Fatalf("ticket=%+v err=%v", got, err)
-	}
-	if err := s.Approve(Approval{ID: "A-1", Actor: "human", PlanHash: "p", ScopeHash: "s", Baseline: "b"}); err != nil {
-		t.Fatal(err)
-	}
-	e := Event{ID: "E-1", Type: "ticket.created", IdempotencyKey: "k-1", Actor: "engine"}
-	if err := s.AppendEvent(e); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.AppendEvent(e); err == nil {
-		t.Fatal("duplicate idempotency key accepted")
-	}
+// Store behaviour (transitions, claims, attempts, project scoping) now lives
+// in store_test.go, alongside the store.go/transitions.go/claims.go/
+// attempts.go it exercises. ApprovalValid is pure and stays here.
+func TestApprovalValid(t *testing.T) {
 	if !ApprovalValid(Approval{Actor: "human", PlanHash: "p", ScopeHash: "s", Baseline: "b"}, "p", "s", "b") {
 		t.Fatal("valid approval rejected")
 	}
