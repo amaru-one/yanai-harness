@@ -192,7 +192,7 @@ func mockResponse(model string, msgs []Message) string {
 		b.WriteString("NECESITO: -\n")
 	case strings.Contains(last, "TAREA_DE_EJECUCION"):
 		b.WriteString("## Entregable simulado\n\nContenido de ejemplo.\n\n")
-		b.WriteString("=== ARCHIVO: ejemplo.md ===\n# Ejemplo\nArchivo generado en modo simulado.\n=== FIN ARCHIVO ===\n")
+		b.WriteString("=== ARCHIVO: yanai-server/ejemplo.md ===\n# Ejemplo\nArchivo generado en modo simulado.\n=== FIN ARCHIVO ===\n")
 	case strings.Contains(last, "CONSOLIDA EL PLAN"):
 		b.WriteString("## Plan de implementación (simulado)\n\nResumen del plan.\n\n")
 		b.WriteString("### TAREA: T-001\nRESPONSABLE: arquitecto-bd\nTITULO: Modelar evaluación formativa\nDESCRIPCION: Diseñar las tablas de competencias y calificaciones.\nCRITERIOS:\n- Diagrama ER entregado\n- DDL ejecutable\nDEPENDE_DE: -\n\n")

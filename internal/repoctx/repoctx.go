@@ -1,14 +1,4 @@
-// Package repoctx builds the repository context for the teaching app that
-// gets handed to the agents, in two passes:
-//
-//   - Index: the file tree plus the content of each SPEC.md
-//     It's the compressed map — it grows with the repo much slower than the
-//     code, because a SPEC.md summarizes an entire folder in a few paragraphs.
-//   - Files: the full content of the specific paths an agent asked for
-//     after reading the Index.
-//
-// No dump of the whole repository ever goes into an agent's context: that's
-// what a fixed byte cap can't scale to as the code grows.
+// Package repoctx builds a backend-only repository index and selected-file context.
 package repoctx
 
 import (
@@ -19,166 +9,157 @@ import (
 	"strings"
 
 	"github.com/yanai/yanai-harness/internal/config"
+	"github.com/yanai/yanai-harness/internal/repository"
 )
 
-// Index returns the repository tree and the content of its SPEC.md
-// It's the first thing an agent sees: enough to decide
-// which code files to request with Files, without loading the code itself.
-func Index(r config.Repo) (string, error) {
-	if strings.TrimSpace(r.Path) == "" {
-		return "_(no hay repositorio configurado)_", nil
+func selected(r config.Repo, path string) bool {
+	base := filepath.Base(path)
+	if base == "SPEC.md" || path == "AGENTS.md" {
+		return true
 	}
-	root, err := filepath.Abs(r.Path)
+	for _, p := range r.Priority {
+		if p == path || p == base {
+			return true
+		}
+	}
+	for _, ext := range r.Extensions {
+		if strings.EqualFold(ext, filepath.Ext(path)) {
+			return true
+		}
+	}
+	return false
+}
+
+// Index uses the same boundary checks as explicit reads; symlink targets,
+// ignored files, secrets and the UI never enter the index or SPEC payloads.
+func Index(r config.Repo) (string, error) {
+	target, err := repository.Open(r, "")
 	if err != nil {
 		return "", err
 	}
-	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
-		return "", fmt.Errorf("repo.path is not an accessible directory: %s", root)
+	snapshot, err := target.Snapshot()
+	if err != nil {
+		return "", err
 	}
-
-	exts := map[string]bool{}
-	for _, e := range r.Extensions {
-		exts[strings.ToLower(e)] = true
+	allowed := r.AllowedPaths
+	if len(allowed) == 0 {
+		allowed = []string{"AGENTS.md", repository.ModuleDir}
 	}
-	exclude := map[string]bool{}
-	for _, d := range r.ExcludeDirs {
-		exclude[d] = true
-	}
-	priority := map[string]bool{}
-	for _, p := range r.Priority {
-		priority[filepath.ToSlash(p)] = true
-	}
-
-	type file struct {
-		rel  string
-		size int64
-	}
-	var all []file
-
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil // ignore what can't be read
+	var paths []string
+	err = filepath.WalkDir(target.Root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		rel, _ := filepath.Rel(root, path)
+		rel, err := filepath.Rel(target.Root, path)
+		if err != nil {
+			return err
+		}
 		if rel == "." {
 			return nil
 		}
+		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
-			if exclude[d.Name()] || strings.HasPrefix(d.Name(), ".") && d.Name() != "." {
+			included := false
+			for _, prefix := range allowed {
+				if rel == prefix || strings.HasPrefix(rel, prefix+"/") || strings.HasPrefix(prefix, rel+"/") {
+					included = true
+				}
+			}
+			if !included || strings.HasPrefix(d.Name(), ".") || d.Name() == "yanai-ui" {
 				return filepath.SkipDir
+			}
+			for _, excluded := range r.ExcludeDirs {
+				if d.Name() == excluded {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
-		slash := filepath.ToSlash(rel)
-		if !exts[strings.ToLower(filepath.Ext(d.Name()))] && !priority[slash] && !priority[d.Name()] {
+		if d.Type()&os.ModeSymlink != 0 || !selected(r, rel) {
 			return nil
 		}
-		info, err := d.Info()
-		if err != nil {
+		if err := target.CheckPath(rel); err != nil {
 			return nil
 		}
-		all = append(all, file{rel: slash, size: info.Size()})
+		paths = append(paths, rel)
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].rel < all[j].rel })
-
+	sort.Strings(paths)
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Estructura del repositorio (%s)\n\n```\n", root)
-	for _, a := range all {
-		fmt.Fprintf(&b, "%s (%d bytes)\n", a.rel, a.size)
+	b.WriteString(snapshot.Label())
+	b.WriteString("\n## Estructura del repositorio\n\n```\n")
+	for _, path := range paths {
+		fmt.Fprintln(&b, path)
 	}
-	if len(all) == 0 {
-		b.WriteString("(sin archivos que coincidan con los filtros)\n")
-	}
-	b.WriteString("```\n\n")
-	b.WriteString("## Mapa: contenido de los SPEC.md\n\n")
-	b.WriteString("Cada SPEC.md describe su carpeta — propósito, contenido, convenciones — y " +
-		"es la fuente de verdad sobre el código, no al revés. Úsalos para decidir qué " +
-		"archivos de código pedir a continuación (formato NECESITO, ver tu instrucción).\n\n")
-
-	hadSpec := false
-	for _, a := range all {
-		base := filepath.Base(a.rel)
-		if base != "SPEC.md" {
+	b.WriteString("```\n\n## Instrucciones y SPEC.md\n\n")
+	for _, path := range paths {
+		if filepath.Base(path) != "SPEC.md" && path != "AGENTS.md" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(a.rel)))
+		data, err := target.ReadFile(path, 4*1024*1024+1)
 		if err != nil {
-			continue
+			return "", err
 		}
-		hadSpec = true
-		fmt.Fprintf(&b, "### %s\n\n%s\n\n", a.rel, string(data))
-	}
-	if !hadSpec {
-		b.WriteString("_(el repositorio no tiene SPEC.md todavía; pide los archivos " +
-			"de código que necesites a partir del árbol de arriba)_\n")
+		if len(data) > 4*1024*1024 {
+			return "", fmt.Errorf("governing document too large: %s", path)
+		}
+		fmt.Fprintf(&b, "### %s\n\n%s\n\n", path, data)
 	}
 	return b.String(), nil
 }
 
-// Files reads the full content of the specific paths an agent requested
-// after seeing the Index. Paths outside the repository or missing are
-// reported, not silently ignored: an agent that asked for something and
-// didn't get it needs to know.
+// Files reports denied/missing paths without reading them. Explicit requests
+// cannot bypass the index's allowlist, excludes, or extension filters.
 func Files(r config.Repo, paths []string) (string, error) {
-	if strings.TrimSpace(r.Path) == "" {
-		return "_(no hay repositorio configurado)_", nil
-	}
-	if len(paths) == 0 {
-		return "_(el agente no pidió ningún archivo de código; se apoya en el Indice)_", nil
-	}
-	root, err := filepath.Abs(r.Path)
+	target, err := repository.Open(r, "")
 	if err != nil {
 		return "", err
 	}
-	rootWithSep := root + string(filepath.Separator)
-
-	maxFile := r.MaxBytesFile
-	if maxFile == 0 {
+	snapshot, err := target.Snapshot()
+	if err != nil {
+		return "", err
+	}
+	maxFile, maxTotal := r.MaxBytesFile, r.MaxBytesTotal
+	if maxFile <= 0 {
 		maxFile = 24000
 	}
-	maxTotal := r.MaxBytesTotal
-	if maxTotal == 0 {
+	if maxTotal <= 0 {
 		maxTotal = 400000
 	}
-
 	var b strings.Builder
+	b.WriteString(snapshot.Label())
 	total := 0
-	skipped := 0
-	for _, rel := range paths {
-		path := filepath.Join(root, filepath.FromSlash(rel))
-		absPath, err := filepath.Abs(path)
-		if err != nil || !strings.HasPrefix(absPath, rootWithSep) {
-			fmt.Fprintf(&b, "### %s\n\n_(ruta fuera del repositorio, omitida)_\n\n", rel)
+	for _, path := range paths {
+		if err := target.CheckPath(path); err != nil {
+			fmt.Fprintf(&b, "\n### %s\n_(denied: %v)_\n", path, err)
 			continue
 		}
-		if total >= maxTotal {
-			skipped++
+		if !selected(r, path) {
+			fmt.Fprintf(&b, "\n### %s\n_(excluded by file filters)_\n", path)
 			continue
 		}
-		data, err := os.ReadFile(absPath)
+		limit := min(maxFile, maxTotal-total)
+		if limit <= 0 {
+			b.WriteString("\n_(context byte limit reached)_\n")
+			break
+		}
+		data, err := target.ReadFile(path, limit+1)
 		if err != nil {
-			fmt.Fprintf(&b, "### %s\n\n_(no se pudo leer: %v)_\n\n", rel, err)
+			fmt.Fprintf(&b, "\n### %s\n_(not read: %v)_\n", path, err)
 			continue
 		}
-		text := string(data)
-		truncated := false
-		if len(text) > maxFile {
-			text = text[:maxFile]
-			truncated = true
+		truncated := len(data) > limit
+		if truncated {
+			data = data[:limit]
 		}
-		fmt.Fprintf(&b, "### %s\n\n```%s\n%s\n```\n", rel, language(rel), text)
+		fmt.Fprintf(&b, "\n### %s\n\n```%s\n%s\n```\n", path, language(path), data)
 		if truncated {
 			b.WriteString("_(archivo recortado por tamaño)_\n")
 		}
-		b.WriteString("\n")
-		total += len(text)
-	}
-	if skipped > 0 {
-		fmt.Fprintf(&b, "_(%d archivo(s) pedidos no se incluyeron: se alcanzó el tope de %d bytes)_\n", skipped, maxTotal)
+		total += len(data)
 	}
 	return b.String(), nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -257,9 +258,8 @@ func ParseNeeds(text string) []string {
 		if v == "" || v == "-" {
 			continue
 		}
-		if p := cleanPath(v); p != "" {
-			paths = append(paths, p)
-		}
+		// Preserve requests so the repository reader can report denied paths.
+		paths = append(paths, strings.Trim(v, "`\"' "))
 	}
 	return paths
 }
@@ -285,17 +285,16 @@ func ExtractFiles(text string) []ExtractedFile {
 	return out
 }
 
-// cleanPath prevents absolute paths or ".." from escaping the deliverable.
+// cleanPath rejects unsafe paths rather than rewriting their destination.
 func cleanPath(r string) string {
 	r = strings.TrimSpace(strings.Trim(r, "`\"' "))
-	r = strings.ReplaceAll(r, "\\", "/")
-	r = strings.TrimPrefix(r, "/")
-	var parts []string
-	for _, p := range strings.Split(r, "/") {
-		if p == "" || p == "." || p == ".." {
-			continue
-		}
-		parts = append(parts, p)
+	if r == "" || r == "." || filepath.IsAbs(r) || strings.ContainsAny(r, "\\\x00\r\n") || filepath.ToSlash(filepath.Clean(r)) != r {
+		return ""
 	}
-	return strings.Join(parts, "/")
+	for _, p := range strings.Split(r, "/") {
+		if p == ".." {
+			return ""
+		}
+	}
+	return r
 }

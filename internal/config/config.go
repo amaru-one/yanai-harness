@@ -21,6 +21,7 @@ type Agent struct {
 // Repo describes how to read the source code of the teaching app.
 type Repo struct {
 	Path          string   `json:"path"`
+	AllowedPaths  []string `json:"allowed_paths,omitempty"`
 	Extensions    []string `json:"extensions"`
 	ExcludeDirs   []string `json:"exclude_dirs"`
 	Priority      []string `json:"priority"`
@@ -69,7 +70,15 @@ var ValidRoles = []string{RolePO, RoleArchitect, RoleEngineer, RoleDesigner}
 
 // Load reads the config from the workspace and applies default values.
 func Load(ws string) (*Config, error) {
-	path := filepath.Join(ws, "yanai.config.json")
+	abs, err := filepath.Abs(ws)
+	if err != nil {
+		return nil, err
+	}
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: %w", err)
+	}
+	path := filepath.Join(abs, "yanai.config.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("could not read %s (did you run 'yanai init'?): %w", path, err)
@@ -80,6 +89,9 @@ func Load(ws string) (*Config, error) {
 	}
 	c.path = path
 	c.applyDefaults()
+	if c.Repo.Path != "" && !filepath.IsAbs(c.Repo.Path) {
+		c.Repo.Path = filepath.Join(abs, c.Repo.Path)
+	}
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
@@ -149,3 +161,49 @@ func (c *Config) Agent(role string) (Agent, error) {
 
 // APIKey reads the key from the configured environment variable.
 func (c *Config) APIKey() string { return os.Getenv(c.OpenRouter.APIKeyEnv) }
+
+// SetRepoPath updates just the binding, preserving model choices and unknown
+// fields from newer configurations. The caller supplies a validated absolute path.
+func SetRepoPath(ws, path string) error {
+	name := filepath.Join(ws, "yanai.config.json")
+	data, err := os.ReadFile(name)
+	if err != nil {
+		return err
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return err
+	}
+	var repo map[string]json.RawMessage
+	if err := json.Unmarshal(doc["repo"], &repo); err != nil {
+		return err
+	}
+	if repo == nil {
+		return fmt.Errorf("configuration requires a repo object")
+	}
+	repo["path"], err = json.Marshal(path)
+	if err != nil {
+		return err
+	}
+	doc["repo"], err = json.Marshal(repo)
+	if err != nil {
+		return err
+	}
+	data, err = json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(ws, ".config-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), name)
+}

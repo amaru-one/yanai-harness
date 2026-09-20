@@ -132,17 +132,14 @@ func TestExtractFiles(t *testing.T) {
 		"=== FIN ARCHIVO ===\n"
 
 	as := ExtractFiles(text)
-	if len(as) != 2 {
-		t.Fatalf("expected 2 files, got %d", len(as))
+	if len(as) != 1 {
+		t.Fatalf("expected only the safe file, got %d", len(as))
 	}
 	if as[0].Path != "db/schema.sql" {
 		t.Errorf("path 0 = %q", as[0].Path)
 	}
 	if as[0].Content != "CREATE TABLE competencia (id uuid);" {
 		t.Errorf("content 0 = %q", as[0].Content)
-	}
-	if as[1].Path != "etc/passwd" {
-		t.Errorf("path with .. was not sanitized: %q", as[1].Path)
 	}
 }
 
@@ -175,8 +172,8 @@ func TestParseNeeds(t *testing.T) {
 	if paths[1] != "internal/httpapi/grades.go" {
 		t.Errorf("path 1 = %q", paths[1])
 	}
-	if paths[2] != "etc/passwd" {
-		t.Errorf("path with .. was not sanitized: %q", paths[2])
+	if paths[2] != "../../etc/passwd" {
+		t.Errorf("unsafe request must reach the policy unchanged: %q", paths[2])
 	}
 }
 

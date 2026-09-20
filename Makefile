@@ -25,7 +25,7 @@ demo: build
 	YANAI_MOCK=1 YANAI_NO_REPO=1 ./$(BIN) analyze --ws /tmp/yanai-demo/ws /tmp/yanai-demo/ws/interviews/e1.md
 	YANAI_MOCK=1 YANAI_NO_REPO=1 ./$(BIN) discuss --ws /tmp/yanai-demo/ws
 	./$(BIN) approve --ws /tmp/yanai-demo/ws --note "demo"
-	YANAI_MOCK=1 YANAI_NO_REPO=1 ./$(BIN) run --ws /tmp/yanai-demo/ws
+	YANAI_MOCK=1 ./$(BIN) run --ws /tmp/yanai-demo/ws
 
 clean:
 	rm -f $(BIN)
