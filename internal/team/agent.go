@@ -53,7 +53,40 @@ func (r *Runner) Run(ctx context.Context, role, message string) (string, error) 
 // wire-format contract with the (Spanish, untouched) prompt templates in
 // internal/templates/files/prompts, which instruct the LLM to emit exactly
 // these words. They are intentionally left untranslated.
-var reVerdict = regexp.MustCompile(`(?mi)^\s*VEREDICTO:\s*(NUEVO_PLAN|SUFICIENTE)\s*$`)
+// The verdicts the Product Owner may emit, and the single place that defines
+// them. The prompt template, the inline analysis instructions in flow.go and
+// the CLI usage text all render from these lists, so the vocabulary cannot
+// drift between what the model is told and what the engine accepts.
+//
+// NUEVO_PLAN and SUFICIENTE are the original pair, kept so cycles and
+// workspaces created before the split still parse.
+const (
+	VerdictProposeChange     = "PROPOSE_CHANGE"
+	VerdictNoChangeNeeded    = "NO_CHANGE_NEEDED"
+	VerdictNeedsEvidence     = "NEEDS_EVIDENCE"
+	VerdictOutOfScope        = "OUT_OF_SCOPE"
+	VerdictBlockedByBaseline = "BLOCKED_BY_BASELINE"
+
+	VerdictLegacyNewPlan    = "NUEVO_PLAN"
+	VerdictLegacySufficient = "SUFICIENTE"
+)
+
+// ChangeVerdicts open a cycle for discussion; TerminalVerdicts close it
+// without one. Every verdict belongs to exactly one of the two.
+var (
+	ChangeVerdicts = []string{VerdictProposeChange, VerdictLegacyNewPlan}
+
+	TerminalVerdicts = []string{
+		VerdictNoChangeNeeded,
+		VerdictNeedsEvidence,
+		VerdictOutOfScope,
+		VerdictBlockedByBaseline,
+		VerdictLegacySufficient,
+	}
+)
+
+var reVerdict = regexp.MustCompile(
+	`(?mi)^\s*VEREDICTO:\s*(` + strings.Join(append(append([]string{}, ChangeVerdicts...), TerminalVerdicts...), "|") + `)\s*$`)
 
 // Verdict extracts the Product Owner's decision from the analysis text.
 func Verdict(text string) string {
@@ -62,6 +95,47 @@ func Verdict(text string) string {
 		return ""
 	}
 	return strings.ToUpper(m[1])
+}
+
+// verdictInstructions is the wording the Product Owner sees at the end of every
+// analysis request. It lives here, next to the constants the engine matches on,
+// so the instruction and the parser can't drift apart. prompts/product-owner.md
+// states the same rules as the role's standing contract.
+const verdictInstructions = `Termina el documento con exactamente una línea, con uno de estos cinco veredictos:
+
+VEREDICTO: PROPOSE_CHANGE
+  Hay un problema real del docente, sustentado en citas, dentro del alcance, y
+  el equipo puede construir algo útil para él en este ciclo.
+
+VEREDICTO: NO_CHANGE_NEEDED
+  Las entrevistas confirman que lo construido cubre la necesidad. Solo este
+  veredicto afirma que el producto es suficiente, y exige evidencia positiva.
+
+VEREDICTO: NEEDS_EVIDENCE
+  Las notas no alcanzan para decidir. Que un docente no mencione una
+  funcionalidad NO es evidencia de que no la use: es ausencia de evidencia.
+  Di qué falta averiguar y con quién.
+
+VEREDICTO: OUT_OF_SCOPE
+  La petición es legítima pero cae fuera del alcance definido. La necesidad
+  queda registrada; este proyecto no la atiende.
+
+VEREDICTO: BLOCKED_BY_BASELINE
+  No se puede evaluar la propuesta hasta que el backend tenga una base probada.
+  Di exactamente qué hace falta.
+`
+
+// IsTerminalVerdict reports whether the verdict closes the cycle without a
+// plan. The four non-change outcomes are distinct findings — "we lack the
+// evidence to judge" is not "the app is sufficient" — but they share this
+// control-flow branch until Step 4 gives each its own persisted state.
+func IsTerminalVerdict(v string) bool {
+	for _, t := range TerminalVerdicts {
+		if strings.EqualFold(v, t) {
+			return true
+		}
+	}
+	return false
 }
 
 var (

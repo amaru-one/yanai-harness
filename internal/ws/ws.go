@@ -46,13 +46,27 @@ type Event struct {
 
 // State is what lives in cycles/NNN/state.json.
 type State struct {
-	Cycle   int       `json:"cycle"`
-	Phase   string    `json:"phase"`
-	Verdict string    `json:"verdict,omitempty"`
-	Created time.Time `json:"created"`
-	Updated time.Time `json:"updated"`
-	Tasks   []Task    `json:"tasks"`
-	History []Event   `json:"history"`
+	Cycle        int              `json:"cycle"`
+	Phase        string           `json:"phase"`
+	Verdict      string           `json:"verdict,omitempty"`
+	PlanHash     string           `json:"plan_hash,omitempty"`
+	ScopeHash    string           `json:"scope_hash,omitempty"`
+	BaselineHash string           `json:"baseline_hash,omitempty"`
+	Approval     *ApprovalBinding `json:"approval,omitempty"`
+	Created      time.Time        `json:"created"`
+	Updated      time.Time        `json:"updated"`
+	Tasks        []Task           `json:"tasks"`
+	History      []Event          `json:"history"`
+}
+
+// ApprovalBinding records the exact inputs a human approved. A plan or scope
+// edit invalidates the binding before execution can resume.
+type ApprovalBinding struct {
+	Actor        string    `json:"actor"`
+	PlanHash     string    `json:"plan_hash"`
+	ScopeHash    string    `json:"scope_hash"`
+	BaselineHash string    `json:"baseline_hash"`
+	ApprovedAt   time.Time `json:"approved_at"`
 }
 
 // Workspace points to the working directory.

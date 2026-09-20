@@ -40,12 +40,13 @@ y la posibilidad de que una IE cambie de esquema entre años.
 grado, nómina de matrícula, y la relación docente–área–sección, que es de muchos
 a muchos y cambia durante el año.
 
-**Compatibilidad con SIAGIE.** El docente ya está obligado a registrar en SIAGIE.
-Si nuestra app le genera trabajo doble, no la usa. El modelo debe permitir
-exportar lo que SIAGIE espera sin transformaciones que pierdan información.
-Guarda los identificadores oficiales (código modular de la IE, código del
-estudiante, DNI cuando exista) como claves externas de conciliación, nunca como
-clave primaria interna.
+**Identificadores oficiales.** Guarda los identificadores oficiales (código
+modular de la IE, código del estudiante, DNI cuando exista) como claves externas
+de conciliación, nunca como clave primaria interna.
+
+La **integración técnica con SIAGIE está fuera de alcance** (ver `alcance.md`) y
+no existe en el producto. No diseñes para exportar a SIAGIE ni propongas esa
+integración mientras siga fuera de alcance.
 
 ## Reglas de diseño que no negocias
 
@@ -55,12 +56,19 @@ clave primaria interna.
   datos de estudiantes.
 - **Nada se borra.** Una calificación corregida deja rastro. Usa borrado lógico
   e historial de cambios con autor y fecha en todo lo que sea evaluación.
-- **Escribe para conectividad mala.** El docente registra notas en una escuela
-  sin internet estable. El modelo debe tolerar sincronización diferida: claves
-  generadas en el cliente (UUID), marca temporal de origen, y una estrategia
-  explícita de resolución de conflictos.
 - **Un docente no ve lo que no le toca.** El modelo de permisos por sección y
-  área es parte del esquema, no un añadido de la capa de aplicación.
+  área es parte del esquema, no un añadido de la capa de aplicación. Hoy eso se
+  hace con RLS forzado por colegio; toda consulta corre en transacción de
+  inquilino.
+- **Un criterio no recibe un nivel de logro.** El criterio es la vara, no el
+  juicio oficial (RVM 094-2020, 5.1.1.3). El nivel de logro de una competencia
+  lo afirma el docente explícitamente y no se deriva de nada. Un criterio sí
+  puede llevar una marca por evidencia — numérica o un nivel de rúbrica — dentro
+  de una assessment; eso es evidencia y nunca se agrega para producir el nivel
+  oficial.
+- **No diseñes sincronización offline.** El producto no la tiene y el alcance no
+  la pide: nada de claves generadas en el cliente ni estrategias de resolución
+  de conflictos, salvo que el alcance cambie y lo diga.
 
 ## Cómo entregas
 
@@ -72,6 +80,20 @@ clave primaria interna.
   por qué.
 - Los datos semilla del currículo (áreas, competencias) van como migración
   aparte, con su fuente citada.
+
+Toda obra de esquema es **una migración goose numerada nueva** en
+`yanai-server/migrations/`, con sus marcas `-- +goose Up` / `-- +goose Down`.
+Nunca se reescribe una migración ya aplicada.
+
+## El protocolo SPEC
+
+El repositorio `yanai` tiene un `SPEC.md` por carpeta con código, obligatorio
+según su `AGENTS.md`. Lee completo el de la carpeta antes de tocarla —
+`yanai-server/migrations/SPEC.md` antes de cualquier trabajo de esquema — y
+actualízalo en el mismo entregable en que cambias algo, propagando a las
+carpetas afectadas. **Si el spec y el código se contradicen, repórtalo; no lo
+resuelvas solo:** la regla "gana el spec" aplicada a ciegas puede borrar
+comportamiento que la base de datos ya garantiza.
 
 ## Honestidad normativa
 
