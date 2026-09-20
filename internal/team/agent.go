@@ -11,15 +11,17 @@ import (
 
 	"github.com/yanai/yanai-harness/internal/config"
 	"github.com/yanai/yanai-harness/internal/openrouter"
+	"github.com/yanai/yanai-harness/internal/workflow"
 	"github.com/yanai/yanai-harness/internal/ws"
 )
 
 // Runner runs a specific agent.
 type Runner struct {
-	Cfg       *config.Config
-	Client    *openrouter.Client
-	Workspace *ws.Workspace
-	Verbose   bool
+	Cfg        *config.Config
+	Client     *openrouter.Client
+	Workspace  *ws.Workspace
+	Verbose    bool
+	Redactions []string
 }
 
 // Run calls the role's model with its system prompt and the given message.
@@ -34,8 +36,8 @@ func (r *Runner) Run(ctx context.Context, role, message string) (string, error) 
 	}
 	fmt.Fprintf(os.Stderr, "→ %s (%s) thinking...\n", ag.Name, ag.Model)
 	msgs := []openrouter.Message{
-		{Role: "system", Content: string(system)},
-		{Role: "user", Content: message},
+		{Role: "system", Content: workflow.Redact(string(system), r.Redactions)},
+		{Role: "user", Content: workflow.Redact(message, r.Redactions)},
 	}
 	text, usage, err := r.Client.Chat(ctx, ag.Model, msgs, ag.Temperature, ag.MaxTokens)
 	if err != nil {
@@ -98,38 +100,9 @@ func Verdict(text string) string {
 	return strings.ToUpper(m[1])
 }
 
-// verdictInstructions is the wording the Product Owner sees at the end of every
-// analysis request. It lives here, next to the constants the engine matches on,
-// so the instruction and the parser can't drift apart. prompts/product-owner.md
-// states the same rules as the role's standing contract.
-const verdictInstructions = `Termina el documento con exactamente una línea, con uno de estos cinco veredictos:
-
-VEREDICTO: PROPOSE_CHANGE
-  Hay un problema real del docente, sustentado en citas, dentro del alcance, y
-  el equipo puede construir algo útil para él en este ciclo.
-
-VEREDICTO: NO_CHANGE_NEEDED
-  Las entrevistas confirman que lo construido cubre la necesidad. Solo este
-  veredicto afirma que el producto es suficiente, y exige evidencia positiva.
-
-VEREDICTO: NEEDS_EVIDENCE
-  Las notas no alcanzan para decidir. Que un docente no mencione una
-  funcionalidad NO es evidencia de que no la use: es ausencia de evidencia.
-  Di qué falta averiguar y con quién.
-
-VEREDICTO: OUT_OF_SCOPE
-  La petición es legítima pero cae fuera del alcance definido. La necesidad
-  queda registrada; este proyecto no la atiende.
-
-VEREDICTO: BLOCKED_BY_BASELINE
-  No se puede evaluar la propuesta hasta que el backend tenga una base probada.
-  Di exactamente qué hace falta.
-`
-
 // IsTerminalVerdict reports whether the verdict closes the cycle without a
 // plan. The four non-change outcomes are distinct findings — "we lack the
-// evidence to judge" is not "the app is sufficient" — but they share this
-// control-flow branch until Step 4 gives each its own persisted state.
+// evidence to judge" is not "the app is sufficient" — and new cycles persist distinct states.
 func IsTerminalVerdict(v string) bool {
 	for _, t := range TerminalVerdicts {
 		if strings.EqualFold(v, t) {

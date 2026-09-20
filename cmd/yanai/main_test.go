@@ -181,7 +181,7 @@ func approvedCycle(t *testing.T) (app, workspace string) {
 	}
 	interview := filepath.Join(workspace, "interviews/test.md")
 	put(t, interview, "A teacher wants less repeated writing.")
-	if err := cmdAnalyze([]string{"--ws", workspace, interview}); err != nil {
+	if err := cmdAnalyze([]string{"--ws", workspace, "--privacy-reviewed", interview}); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmdDiscuss([]string{"--ws", workspace}); err != nil {

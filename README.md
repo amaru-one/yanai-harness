@@ -1,13 +1,12 @@
 # yanai — equipo de agentes para la aplicación docente
 
 Un binario en Go que corre cuatro agentes sobre **OpenRouter** con tus claves.
-Todo lo que producen queda en markdown, en carpetas que puedes leer y versionar
-en git. **Nada se implementa sin que una persona apruebe el plan.**
+Las decisiones se guardan como datos validados y se muestran en Markdown para
+revisión humana. **Nada se implementa sin que una persona apruebe el plan.**
 
-El paquete `internal/workflow` trae contratos tipados, validación de
-dependencias y estado durable en SQLite. **Todavía no está conectado al CLI**:
-existe y está probado, y el flujo actual sigue corriendo sobre `internal/team`.
-Conectarlo es trabajo pendiente.
+El CLI usa los contratos tipados y las validaciones de `internal/workflow`.
+El estado actual sigue en `state.json`; el almacenamiento SQLite aún no está
+conectado. La durabilidad transaccional y la recuperación son Step 5.
 
 ## El equipo
 
@@ -108,7 +107,7 @@ Actualiza `producto.md` al cerrar cada ciclo.
 ## Uso
 
 ```bash
-yanai analyze interviews/docente-01.md    # abre el ciclo
+yanai analyze --privacy-reviewed interviews/docente-01.md    # abre el ciclo
 yanai discuss                              # mesa de trabajo + plan
 # lee cycles/001/04-plan.md con calma
 yanai approve                               # o: yanai reject --note "..."
@@ -119,17 +118,82 @@ yanai status                                # en qué va todo
 Puedes pasarle varias entrevistas juntas:
 
 ```bash
-cat interviews/*.md | yanai analyze -
+cat interviews/*.md | yanai analyze --privacy-reviewed --source-id lote-01 -
 ```
 
 ## Probar sin gastar la clave
 
 ```bash
-YANAI_MOCK=1 yanai analyze interviews/docente-01.md
+YANAI_MOCK=1 yanai analyze --privacy-reviewed interviews/docente-01.md
 ```
 
 Recorre el flujo completo con respuestas simuladas. Útil para ver la forma de
 las carpetas y para probar cambios en el harness.
+
+## Evidencia y decisiones estructuradas
+
+Antes de usar una entrevista, revisa nombres, colegio, datos de estudiantes y
+otros identificadores indirectos. `--privacy-reviewed` declara que hiciste esa
+revisión; no activa un detector infalible de datos personales. Puedes entregar
+un archivo previamente anonimizado o indicar términos con `--redact` repetido.
+También se enmascaran correos y números de identificación/teléfono reconocibles.
+
+```bash
+yanai analyze --privacy-reviewed --source-id entrevista-01 --date 2026-09-20 \
+  --redact "Docente Ejemplo" interviews/docente-01.md
+```
+
+Usa un ID opaco, nunca el nombre de una persona. Omite `--date` si no conoces la
+fecha; el sistema conserva por separado la hora de recepción, sin inventar una
+fecha de entrevista. Un archivo con varias entrevistas se registra como una
+fuente agrupada; usa archivos separados si necesitas procedencias separadas.
+
+El estado guarda el hash original, la revisión del texto redactado y extractos
+numerados por línea. El modelo recibe la vista redactada; las referencias
+`source:<id>` identifican esa vista, nunca el archivo original. Las citas deben
+coincidir exactamente con un extracto de esa revisión. El alcance también queda
+versionado: cada fragmento tiene un ID derivado del contenido, además del hash
+del documento completo. Cambiar la fuente o el alcance exige un nuevo análisis.
+
+`analyze` y la consolidación de `discuss` exigen un objeto JSON de versión 1. El
+motor rechaza campos desconocidos, claves duplicadas, referencias inventadas,
+criterios vacíos, roles desconocidos, ciclos y salidas fuera de las rutas
+permitidas. Solo hay **un intento de corrección** por respuesta inválida; tras
+fallar, no se guarda una decisión ejecutable. El Markdown es una proyección,
+no se vuelve a interpretar como tareas ni autoriza cambios por sí mismo.
+
+Cada resultado persiste un estado distinto y una acción siguiente:
+
+| Resultado | Estado | Acción siguiente |
+|-----------|--------|------------------|
+| `PROPOSE_CHANGE` | `analyzed`, luego `awaiting_approval` | discutir y aprobar el plan |
+| `NO_CHANGE_NEEDED` | `no_change_needed` | conservar la evidencia positiva |
+| `NEEDS_EVIDENCE` | `needs_evidence` | responder las preguntas y analizar otra vez |
+| `OUT_OF_SCOPE` | `out_of_scope` | postergar o revisar el alcance con su dueño |
+| `BLOCKED_BY_BASELINE` | `blocked_by_baseline` | resolver el bloqueo y volver a analizar |
+
+Una entrada vacía produce `NEEDS_EVIDENCE` sin llamar al proveedor. Los conflictos
+que el modelo declara y no resuelve impiden afirmar suficiencia o proponer
+trabajo. El motor verifica citas y referencias; juzgar si una inferencia es
+correcta sigue siendo parte de la revisión humana.
+
+Para trabajo técnico sustentado en un hallazgo de ingeniería:
+
+```bash
+yanai analyze --privacy-reviewed --technical-enabler --source-id baseline-01 hallazgo.md
+```
+
+Solo ese argumento autoriza el origen `technical_enabler`. El modelo no puede
+cambiar una entrada docente a ese tipo para evitar aportar evidencia. Los tickets
+técnicos requieren justificación e inputs versionados; no requieren inventar
+citas de docentes.
+
+Los ciclos anteriores siguen siendo inspeccionables con `status`, pero son de
+solo lectura para aprobación y ejecución. Importa deliberadamente su fuente
+revisada con `analyze --privacy-reviewed .../00-entrada.md`: se crea otro ciclo,
+con la nueva validación. No se promocionan entregables históricos a verificados.
+Las plantillas v5 actualizan el protocolo del PO; `init` conserva tus ediciones
+locales y ofrece los conflictos mediante el mecanismo de plantillas existente.
 
 ## Qué queda en disco
 
@@ -142,9 +206,8 @@ yanai-workspace/
     producto.md              lo mantienen ustedes
   interviews/                tus notas de campo
   cycles/001/
-    00-entrada.md            las entrevistas tal como entraron
-    02-propuesta.md          insights + propuesta del PO
-    02-reporte-suficiencia.md   (si el ciclo cerró sin plan)
+    00-entrada.md            fuente original privada; nunca se envía al modelo
+    02-propuesta.md          proyección de la decisión y sus citas, para cualquier veredicto
     03-discusion.md          lo que dijo cada especialista
     04-plan.md               decisión, conflictos resueltos, recortes, tareas
     05-aprobacion.md         tu decisión y tu motivo
@@ -154,7 +217,7 @@ yanai-workspace/
         archivos/            los archivos que produjo
       disenador/T-002/...
       ingeniero/T-003/...
-    state.json               fase, tareas y bitácora
+    state.json               fuente/revisión, alcance, propuesta y plan tipados, fase y bitácora
 ```
 
 **Hoy** los entregables no se escriben en tu repositorio: quedan en el ciclo
@@ -203,7 +266,7 @@ este binario te entregó la última vez (anotada en
 - **sin cambios** — no tenemos nada nuevo que ofrecerte; lo que hayas hecho con
   ese archivo es asunto tuyo.
 
-**Un archivo que modificaste nunca se sobrescribe.** Un workspace anterior a
+**Una plantilla que modificaste nunca se sobrescribe automáticamente.** Un workspace anterior a
 este mecanismo no tiene manifiesto: en ese caso se asume que editaste todo y no
 se toca nada.
 
@@ -255,5 +318,7 @@ Variables de entorno:
 - **Verifica lo normativo.** El prompt del arquitecto le exige marcar con
   `⚠️ VERIFICAR CON LA NORMA VIGENTE` todo lo que no pueda confirmar. Busca esas
   marcas y confírmalas contra el texto oficial antes de construir.
-- **Versiona el workspace en git.** Los ciclos son el registro de por qué el
-  producto es como es.
+- **Los ciclos contienen información privada.** `00-entrada.md` conserva la
+  fuente original y `state.json` conserva la correspondencia local de redacción.
+  No los publiques ni los subas a un repositorio compartido. Los archivos nuevos
+  del ciclo usan permisos `0600`; esto no sustituye el control del acceso local.

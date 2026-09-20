@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"github.com/yanai/yanai-harness/internal/workflow"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -14,246 +16,6 @@ import (
 	"github.com/yanai/yanai-harness/internal/repository"
 	"github.com/yanai/yanai-harness/internal/ws"
 )
-
-// Analyze opens a new cycle: the PO reads the interviews and decides
-// whether a new plan is needed or the app already covers what teachers need.
-func (r *Runner) Analyze(ctx context.Context, interviews string) (*ws.State, error) {
-	if _, err := repository.Open(r.Cfg.Repo, r.Workspace.Root); err != nil {
-		return nil, err
-	}
-	st, err := r.Workspace.NewCycle()
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := r.Workspace.WriteDocument(st.Cycle, "00-entrada.md", interviews); err != nil {
-		return nil, err
-	}
-
-	repo, err := r.repoContextFor(ctx, config.RolePO,
-		"Vas a leer notas de entrevistas a docentes y decidir si el producto actual "+
-			"ya las cubre o si hace falta un plan nuevo. "+
-			"Necesitas ver el código de las funcionalidades que la entrevista toca, "+
-			"para no proponer algo que ya existe.\n\n# Entrevistas\n\n"+interviews)
-	if err != nil {
-		return nil, err
-	}
-
-	var m strings.Builder
-	m.WriteString("ANALIZA LAS ENTREVISTAS\n\n")
-	m.WriteString("# 1. Alcance y estado del producto\n\n")
-	m.WriteString(r.Workspace.ReadContext())
-	m.WriteString("\n\n# 2. Ciclos anteriores\n\n")
-	m.WriteString(r.Workspace.CycleHistory(st.Cycle))
-	m.WriteString("\n\n# 3. Código actual de la aplicación docente\n\n")
-	m.WriteString(repo)
-	m.WriteString("\n\n# 4. Notas de las entrevistas presenciales\n\n")
-	m.WriteString(interviews)
-	m.WriteString("\n\n# 5. Lo que tienes que entregar\n\n")
-	m.WriteString(`Escribe un documento en markdown con estas secciones, en este orden:
-
-## Insights
-Hallazgos concretos extraídos de las entrevistas. Cada uno citando la evidencia
-textual que lo sustenta. Separa lo que un docente dijo de lo que tú infieres.
-
-## Validación de funcionalidades existentes
-Para cada funcionalidad actual de la app: la entrevista la confirma, la
-contradice, o no dice nada.
-
-## Fuera de alcance
-Lista las peticiones que rechazas por estar fuera del alcance definido, con el
-motivo. Si una petición es valiosa pero no ahora, ponla aquí como "postergada".
-
-## Propuesta
-Si corresponde un plan nuevo: describe QUÉ se va a construir y POR QUÉ, ligado a
-los insights.
-
-` + verdictInstructions)
-
-	text, err := r.Run(ctx, config.RolePO, m.String())
-	if err != nil {
-		return nil, err
-	}
-
-	v := Verdict(text)
-	if v == "" {
-		return nil, fmt.Errorf("the Product Owner response has no valid VEREDICTO; refusing to infer a product decision")
-	}
-	st.Verdict = v
-
-	if IsTerminalVerdict(v) {
-		if _, err := r.Workspace.WriteDocument(st.Cycle, "02-reporte-suficiencia.md", text); err != nil {
-			return nil, err
-		}
-		st.Phase = ws.PhaseSufficient
-		st.Log("analysis: "+v, config.RolePO, "")
-	} else {
-		if _, err := r.Workspace.WriteDocument(st.Cycle, "02-propuesta.md", text); err != nil {
-			return nil, err
-		}
-		st.Phase = ws.PhaseAnalyzed
-		st.Log("analysis: proposing a new plan", config.RolePO, "")
-	}
-	return st, r.Workspace.SaveState(st)
-}
-
-// Discuss runs the working session: each specialist weighs in on the
-// proposal after seeing what the others said, and the PO consolidates the plan.
-func (r *Runner) Discuss(ctx context.Context) (*ws.State, error) {
-	target, err := repository.Open(r.Cfg.Repo, r.Workspace.Root)
-	if err != nil {
-		return nil, err
-	}
-	baseline, err := target.Snapshot()
-	if err != nil {
-		return nil, err
-	}
-	st, err := r.Workspace.LoadState()
-	if err != nil {
-		return nil, err
-	}
-	if st.Phase == ws.PhaseSufficient {
-		return nil, fmt.Errorf("cycle %03d closed with verdict %s: there's nothing to discuss", st.Cycle, st.Verdict)
-	}
-	if st.Phase != ws.PhaseAnalyzed && st.Phase != ws.PhaseRejected {
-		return nil, fmt.Errorf("cycle %03d is in phase %q; 'discuss' only applies after 'analyze' or after a rejection", st.Cycle, st.Phase)
-	}
-
-	proposal := r.Workspace.ReadDocument(st.Cycle, "02-propuesta.md")
-	if proposal == "" {
-		return nil, fmt.Errorf("02-propuesta.md was not found in cycle %03d", st.Cycle)
-	}
-	context_ := r.Workspace.ReadContext()
-
-	var transcript strings.Builder
-	transcript.WriteString(fmt.Sprintf("# Discusión del ciclo %03d\n\n", st.Cycle))
-
-	// If we're coming from a rejection, the team needs to keep it in mind.
-	rejection := r.Workspace.ReadDocument(st.Cycle, "05-aprobacion.md")
-
-	for _, role := range r.Cfg.DiscussionOrder {
-		ag, err := r.Cfg.Agent(role)
-		if err != nil {
-			return nil, err
-		}
-		repo, err := r.repoContextFor(ctx, role,
-			"Vas a opinar sobre esta propuesta del Product Owner desde tu rol. "+
-				"Necesitas ver el código que tu parte del trabajo tocaría.\n\n"+
-				"# Propuesta\n\n"+proposal)
-		if err != nil {
-			return nil, err
-		}
-		var m strings.Builder
-		m.WriteString("REVISA LA PROPUESTA\n\n")
-		m.WriteString("# Alcance y estado del producto\n\n" + context_)
-		m.WriteString("\n\n# Código actual\n\n" + repo)
-		m.WriteString("\n\n# Propuesta del Product Owner\n\n" + proposal)
-		if rejection != "" {
-			m.WriteString("\n\n# El humano rechazó la versión anterior de este plan\n\n" + rejection)
-		}
-		m.WriteString("\n\n# Lo que han dicho tus compañeros hasta ahora\n\n" + transcript.String())
-		m.WriteString("\n\n# Lo que tienes que entregar\n\n")
-		m.WriteString(`Responde en markdown, corto y concreto, con estas secciones:
-
-## Riesgos y objeciones
-Lo que va a fallar si se construye así. Sé específico; no des generalidades.
-
-## Qué necesito de los demás
-Decisiones o entregables que necesitas de otro miembro del equipo para poder
-avanzar, nombrando el rol.
-
-## Mi parte del trabajo
-Qué harías tú, desglosado en piezas de trabajo del tamaño de un día o menos.
-
-## Preguntas abiertas
-Lo que nadie ha respondido todavía y bloquea el diseño.
-
-No escribas código ni maquetas todavía: esto es la discusión previa.`)
-
-		resp, err := r.Run(ctx, role, m.String())
-		if err != nil {
-			return nil, err
-		}
-		fmt.Fprintf(&transcript, "## %s (%s)\n\n%s\n\n---\n\n", ag.Name, role, resp)
-	}
-
-	// The PO consolidates.
-	var mp strings.Builder
-	mp.WriteString("CONSOLIDA EL PLAN\n\n")
-	mp.WriteString("# Alcance y estado del producto\n\n" + context_)
-	mp.WriteString("\n\n# Tu propuesta original\n\n" + proposal)
-	if rejection != "" {
-		mp.WriteString("\n\n# El humano rechazó la versión anterior\n\n" + rejection)
-	}
-	mp.WriteString("\n\n# Discusión del equipo\n\n" + transcript.String())
-	mp.WriteString("\n\n# Lo que tienes que entregar\n\n")
-	mp.WriteString(`Escribe el plan de implementación en markdown:
-
-## Decisión
-Qué se construye en este ciclo, en dos o tres frases.
-
-## Conflictos resueltos
-Dónde el equipo no estuvo de acuerdo y cómo lo resolviste. Di quién cede y por qué.
-
-## Recortes de alcance
-Qué dejaste fuera de este ciclo aunque se haya propuesto.
-
-## Riesgos aceptados
-Los riesgos que el equipo señaló y que decides asumir igual.
-
-## Preguntas para el humano
-Lo que necesita decidir una persona antes de implementar. Si no hay, escribe "Ninguna".
-
-## Tareas
-Un bloque por tarea, con este formato exacto y nada más entre los campos:
-
-### TAREA: T-001
-RESPONSABLE: arquitecto-bd
-TITULO: <una línea>
-DESCRIPCION: <una o dos líneas>
-CRITERIOS:
-- <criterio de aceptación verificable>
-- <otro>
-DEPENDE_DE: -
-
-Usa IDs correlativos T-001, T-002, ... El campo RESPONSABLE solo puede ser uno de:
-arquitecto-bd, disenador, ingeniero. En DEPENDE_DE pon "-" si no depende de nada,
-o una lista de IDs separados por coma. Ordena las tareas por dependencia.`)
-
-	plan, err := r.Run(ctx, config.RolePO, mp.String())
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := r.Workspace.WriteDocument(st.Cycle, "03-discusion.md", transcript.String()); err != nil {
-		return nil, err
-	}
-	if _, err := r.Workspace.WriteDocument(st.Cycle, "04-plan.md", plan); err != nil {
-		return nil, err
-	}
-	st.PlanHash = contentHash(plan)
-	st.ScopeHash = contentHash(context_)
-	current, err := target.Snapshot()
-	if err != nil {
-		return nil, err
-	}
-	if baseline.Baseline() != current.Baseline() {
-		return nil, fmt.Errorf("repository changed during planning; run discuss again")
-	}
-	st.BaselineHash = baseline.Baseline()
-
-	tasks := ParseTasks(plan)
-	if len(tasks) == 0 {
-		return nil, fmt.Errorf("the PO didn't produce tasks in the expected format; check %s", filepath.Join(r.Workspace.CycleDir(st.Cycle), "04-plan.md"))
-	}
-	if err := validateTasksForRoles(tasks, r.Cfg.Agents); err != nil {
-		return nil, err
-	}
-	st.Tasks = tasks
-	st.Phase = ws.PhaseWaiting
-	st.Log("plan consolidated, awaiting human approval", config.RolePO, fmt.Sprintf("%d tasks", len(tasks)))
-	return st, r.Workspace.SaveState(st)
-}
 
 func validateTasks(ts []ws.Task) error {
 	valid := map[string]bool{config.RoleArchitect: true, config.RoleDesigner: true, config.RoleEngineer: true}
@@ -334,8 +96,11 @@ func (r *Runner) Approve(note string) (*ws.State, error) {
 	}
 	// Validate before mutating: an approval that fails its own checks must
 	// leave the cycle exactly as it was.
+	if err := r.validateCurrentPlan(st); err != nil {
+		return nil, err
+	}
 	plan := r.Workspace.ReadDocument(st.Cycle, "04-plan.md")
-	if plan == "" || st.PlanHash == "" || contentHash(plan) != st.PlanHash || st.ScopeHash == "" || st.BaselineHash == "" {
+	if plan == "" || st.PlanHash == "" || plan != workflow.RenderProposal(*st.Plan) || st.ScopeHash == "" || st.BaselineHash == "" {
 		return nil, fmt.Errorf("approval inputs are missing or changed; regenerate the plan before approval")
 	}
 	st.Phase = ws.PhaseApproved
@@ -395,7 +160,11 @@ func (r *Runner) Execute(ctx context.Context, onlyID string) (*ws.State, error) 
 	if st.Phase != ws.PhaseApproved && st.Phase != ws.PhaseExecuted {
 		return nil, fmt.Errorf("cycle %03d is in phase %q: nothing runs without the human's approval ('yanai approve')", st.Cycle, st.Phase)
 	}
-	if st.Approval == nil || st.Approval.PlanHash != contentHash(r.Workspace.ReadDocument(st.Cycle, "04-plan.md")) || st.Approval.ScopeHash != contentHash(r.Workspace.ReadContext()) || st.Approval.BaselineHash != baseline.Baseline() {
+	if err := r.validateCurrentPlan(st); err != nil {
+		return st, err
+	}
+	r.Redactions = st.Intake.Redactions
+	if st.Approval == nil || st.Approval.PlanHash != st.PlanHash || st.Approval.ScopeHash != contentHash(r.Workspace.ReadContext()) || st.Approval.BaselineHash != baseline.Baseline() {
 		return st, fmt.Errorf("approval is stale or incomplete; plan, scope, or repository baseline changed")
 	}
 
@@ -464,8 +233,24 @@ nunca fragmentos con "resto igual".`)
 			return st, err
 		}
 
+		// Validate against both the repository policy and the structured ticket.
+		var contract workflow.Ticket
+		for _, ticket := range st.Plan.Tickets {
+			if ticket.ID == t.ID {
+				contract = ticket
+			}
+		}
 		// Validate raw paths before the legacy extractor can normalize them.
 		for _, match := range reFile.FindAllStringSubmatch(resp, -1) {
+			expected := false
+			for _, output := range contract.Outputs {
+				if match[1] == output {
+					expected = true
+				}
+			}
+			if !expected {
+				return st, fmt.Errorf("task %s output: path is not a declared ticket output", t.ID)
+			}
 			if err := target.CheckPath(match[1]); err != nil {
 				return st, fmt.Errorf("task %s output: %w", t.ID, err)
 			}
@@ -601,4 +386,50 @@ func optional(s string) string {
 func contentHash(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return fmt.Sprintf("%x", sum[:])
+}
+
+// validateCurrentPlan makes structured data authoritative; Markdown/tasks are
+// projections, not an alternative way to authorize executable instructions.
+func (r *Runner) validateCurrentPlan(st *ws.State) error {
+	if st.SchemaVersion != "1" || st.Plan == nil || st.Intake == nil || st.Scope == nil {
+		return fmt.Errorf("legacy cycle is read-only; re-import its input with analyze --privacy-reviewed")
+	}
+	if r.Cfg == nil {
+		cfg, err := config.Load(r.Workspace.Root)
+		if err != nil {
+			return err
+		}
+		r.Cfg = cfg
+	}
+	target, err := repository.Open(r.Cfg.Repo, r.Workspace.Root)
+	if err != nil {
+		return err
+	}
+	c, err := r.decisionContext(st)
+	if err != nil {
+		return err
+	}
+	if err := workflow.ValidateDecision(*st.Plan, c, r.roles(), target.CheckPath); err != nil {
+		return err
+	}
+	hash, err := workflow.Hash(st.Plan)
+	if err != nil {
+		return err
+	}
+	if st.PlanHash != hash || r.Workspace.ReadDocument(st.Cycle, "04-plan.md") != workflow.RenderProposal(*st.Plan) {
+		return fmt.Errorf("structured plan or review projection changed; discuss again")
+	}
+	expected := tasksForProposal(*st.Plan)
+	actual := append([]ws.Task(nil), st.Tasks...)
+	for i := range actual {
+		actual[i].Status = "pending"
+		actual[i].Deliverable = ""
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		return fmt.Errorf("task projection changed; discuss again")
+	}
+	if st.ScopeHash != contentHash(r.Workspace.ReadContext()) {
+		return fmt.Errorf("project context changed; analyze again")
+	}
+	return nil
 }

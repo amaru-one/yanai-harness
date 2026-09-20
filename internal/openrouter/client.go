@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yanai/yanai-harness/internal/config"
+	"github.com/yanai/yanai-harness/internal/workflow"
 )
 
 // Message is a conversation turn.
@@ -188,6 +189,8 @@ func mockResponse(model string, msgs []Message) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "_(respuesta simulada — YANAI_MOCK=1, modelo configurado: %s)_\n\n", model)
 	switch {
+	case strings.Contains(last, "DECISION_JSON"):
+		return mockDecision(last)
 	case strings.Contains(last, "SELECCIONA_ARCHIVOS"):
 		b.WriteString("NECESITO: -\n")
 	case strings.Contains(last, "TAREA_DE_EJECUCION"):
@@ -205,4 +208,37 @@ func mockResponse(model string, msgs []Message) string {
 		b.WriteString("Comentario simulado del agente sobre la propuesta recibida.\n")
 	}
 	return b.String()
+}
+
+func mockDecision(message string) string {
+	const marker = "DECISION_CONTEXT_JSON\n"
+	_, rest, ok := strings.Cut(message, marker)
+	if !ok {
+		return "{}"
+	}
+	var c workflow.DecisionContext
+	if err := json.NewDecoder(strings.NewReader(rest)).Decode(&c); err != nil {
+		return "{}"
+	}
+	p := workflow.Proposal{SchemaVersion: "1", ID: "mock-decision", Origin: c.Source.Origin, Outcome: workflow.OutcomeProposeChange, Summary: "Propuesta simulada para probar el circuito, no evidencia de valor del producto.", Scope: []string{c.Scope.Requirements[0].ID}, Inputs: c.Inputs}
+	if c.Source.Origin == workflow.Product {
+		if len(c.Source.Excerpts) == 0 {
+			return "{}"
+		}
+		e := c.Source.Excerpts[0]
+		p.Citations = []workflow.Citation{{ID: "C-1", SourceID: c.Source.ID, Revision: c.Source.Revision, ExcerptID: e.ID, Quote: e.Text}}
+		p.Evidence = []string{"C-1"}
+		p.Findings = []workflow.Finding{{Kind: "inference", Text: "Esta fuente permite probar una propuesta simulada.", Evidence: p.Evidence}}
+	} else {
+		p.Rationale = "Comprobar la infraestructura del harness con una tarea técnica explícita."
+	}
+	for i, owner := range []string{"arquitecto-bd", "disenador", "ingeniero"} {
+		t := workflow.Ticket{SchemaVersion: "1", ID: fmt.Sprintf("T-%03d", i+1), Type: p.Origin, Title: "Tarea simulada", Description: "Validar la entrega de un candidato de backend.", Rationale: p.Rationale, Owner: owner, Status: "pending", Evidence: p.Evidence, Scope: p.Scope, Inputs: c.Inputs, Outputs: []string{"yanai-server/ejemplo.md"}, AllowedPaths: []string{"yanai-server"}, BaseCommit: c.BaseCommit, Criteria: []string{"El candidato respeta la ruta de backend."}, MaxAttempts: 2, Revision: 1}
+		if i > 0 {
+			t.DependsOn = []string{"T-001"}
+		}
+		p.Tickets = append(p.Tickets, t)
+	}
+	out, _ := json.Marshal(p)
+	return string(out)
 }
