@@ -81,6 +81,7 @@ type Proposal struct {
 
 type Approval struct {
 	ID           string    `json:"id"`
+	Cycle        int       `json:"cycle,omitempty"`
 	Actor        string    `json:"actor"`
 	PlanHash     string    `json:"plan_hash"`
 	ScopeHash    string    `json:"scope_hash"`
@@ -94,12 +95,17 @@ func ApprovalValid(a Approval, plan, scope, baseline string) bool {
 		a.PlanHash == plan && a.ScopeHash == scope && a.Baseline == baseline
 }
 
+// Event is an append-only fact: a transition happened, requested by Actor.
+// It is always committed in the same database transaction as the state
+// change it records — see appendEventTx — so an event can never exist for a
+// change that didn't happen, and a change never happens without its event.
 type Event struct {
 	ID             string    `json:"id"`
+	Cycle          int       `json:"cycle,omitempty"`
 	TicketID       string    `json:"ticket_id,omitempty"`
 	Actor          string    `json:"actor"`
-	ExpectedState  int64     `json:"expected_state"`
 	Type           string    `json:"type"`
+	Payload        string    `json:"payload,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key"`
 	CreatedAt      time.Time `json:"created_at"`
 }
