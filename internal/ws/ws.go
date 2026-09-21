@@ -100,6 +100,7 @@ type State struct {
 // ApprovalBinding records the exact inputs a human approved. A plan or scope
 // edit invalidates the binding before execution can resume.
 type ApprovalBinding struct {
+	ContractHash string    `json:"contract_hash"`
 	Actor        string    `json:"actor"`
 	PlanHash     string    `json:"plan_hash"`
 	ScopeHash    string    `json:"scope_hash"`
@@ -512,3 +513,6 @@ func firstLines(s string, n int) string {
 	}
 	return strings.TrimSpace(strings.Join(lines, " "))
 }
+
+// RefreshProjection writes a view after a transaction owned by the workflow store.
+func (w *Workspace) RefreshProjection(st *State) error { return w.writeProjection(st) }

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/yanai/yanai-harness/internal/workflow"
 )
 
 // Agent describes a member of the team.
@@ -46,11 +48,12 @@ type OpenRouter struct {
 
 // Config is the full file.
 type Config struct {
-	Project         string           `json:"project"`
-	Repo            Repo             `json:"repo"`
-	OpenRouter      OpenRouter       `json:"openrouter"`
-	Agents          map[string]Agent `json:"agents"`
-	DiscussionOrder []string         `json:"discussion_order"`
+	Execution       workflow.ExecutionPolicy `json:"execution"`
+	Project         string                   `json:"project"`
+	Repo            Repo                     `json:"repo"`
+	OpenRouter      OpenRouter               `json:"openrouter"`
+	Agents          map[string]Agent         `json:"agents"`
+	DiscussionOrder []string                 `json:"discussion_order"`
 
 	path string
 }
@@ -142,6 +145,9 @@ func (c *Config) validate() error {
 		a, ok := c.Agents[r]
 		if !ok {
 			return fmt.Errorf("missing agent %q in %s", r, c.path)
+		}
+		if a.MaxTokens <= 0 || a.MaxTokens > 10000000 {
+			return fmt.Errorf("agent %q max_tokens must be between 1 and 10000000", r)
 		}
 		if a.Model == "" {
 			return fmt.Errorf("agent %q has no 'model' (e.g. anthropic/claude-sonnet-4.5)", r)

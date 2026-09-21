@@ -335,7 +335,7 @@ func TestCompletedAttemptRecordsUsageAndIsNotReconciled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.State != AttemptCompleted || !a.CostKnown || a.TotalTokens != 7 {
+	if a.State != AttemptCompleted || a.CostKnown || a.TotalTokens != 7 {
 		t.Fatalf("attempt = %+v", a)
 	}
 }

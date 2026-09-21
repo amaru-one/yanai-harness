@@ -85,57 +85,6 @@ func validateTaskGraph(ts []ws.Task, valid map[string]bool) error {
 	return nil
 }
 
-// Approve opens the human gate.
-func (r *Runner) Approve(note string) (*ws.State, error) {
-	st, err := r.Workspace.LoadState()
-	if err != nil {
-		return nil, err
-	}
-	if st.Phase == ws.PhaseApproved {
-		// Idempotent replay: re-running 'yanai approve' against a cycle
-		// already approved under this exact plan/scope/baseline is a no-op,
-		// not an error -- a script retried after a transient failure
-		// shouldn't need the human to approve twice. A *different* plan
-		// reaching this phase should be unreachable (Discuss only ever
-		// leaves awaiting_approval or rejected), but this never trusts that
-		// silently.
-		if st.Approval != nil && st.Approval.PlanHash == st.PlanHash && st.Approval.ScopeHash == st.ScopeHash && st.Approval.BaselineHash == st.BaselineHash {
-			return st, nil
-		}
-		return nil, fmt.Errorf("cycle %03d is already approved under a different plan, scope or baseline", st.Cycle)
-	}
-	if st.Phase != ws.PhaseWaiting {
-		return nil, fmt.Errorf("cycle %03d is in phase %q; only a plan in %q can be approved", st.Cycle, st.Phase, ws.PhaseWaiting)
-	}
-	// Validate before mutating: an approval that fails its own checks must
-	// leave the cycle exactly as it was.
-	if err := r.validateCurrentPlan(st); err != nil {
-		return nil, err
-	}
-	plan := r.Workspace.ReadDocument(st.Cycle, "04-plan.md")
-	if plan == "" || st.PlanHash == "" || plan != workflow.RenderProposal(*st.Plan) || st.ScopeHash == "" || st.BaselineHash == "" {
-		return nil, fmt.Errorf("approval inputs are missing or changed; regenerate the plan before approval")
-	}
-	approvedAt := time.Now().UTC()
-	st.Phase = ws.PhaseApproved
-	st.Approval = &ws.ApprovalBinding{Actor: "human", PlanHash: st.PlanHash, ScopeHash: st.ScopeHash, BaselineHash: st.BaselineHash, ApprovedAt: approvedAt}
-	st.Log("plan APPROVED by the human", "human", note)
-	text := fmt.Sprintf("# Aprobación\n\nEstado: APROBADO\nNota: %s\n", optional(note))
-	if _, err := r.Workspace.WriteDocument(st.Cycle, "05-aprobacion.md", text); err != nil {
-		return nil, err
-	}
-	if r.Workspace.Store != nil {
-		approval := workflow.Approval{
-			ID: fmt.Sprintf("A-%03d-%d", st.Cycle, approvedAt.UnixNano()), Cycle: st.Cycle, Actor: "human",
-			PlanHash: st.PlanHash, ScopeHash: st.ScopeHash, Baseline: st.BaselineHash, ApprovedAt: approvedAt,
-		}
-		if err := r.Workspace.Store.RecordApproval(approval); err != nil {
-			return nil, err
-		}
-	}
-	return st, r.Workspace.SaveState(st, workflow.ActorHuman)
-}
-
 // Reject sends the plan back to the team with the human's reason.
 func (r *Runner) Reject(note string) (*ws.State, error) {
 	st, err := r.Workspace.LoadState()
@@ -174,7 +123,7 @@ func isTaskDone(status string) bool {
 // than an in-memory "done" flag: see internal/workflow/transitions.go for
 // why "done" is gone entirely, and checkUnresolvedAttempts for why an
 // interrupted prior model call blocks this rather than silently retrying.
-func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved bool) (*ws.State, error) {
+func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved bool) (result *ws.State, err error) {
 	if os.Getenv("YANAI_NO_REPO") == "1" {
 		return nil, fmt.Errorf("run requires repository context; unset YANAI_NO_REPO")
 	}
@@ -185,16 +134,26 @@ func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved boo
 	if err != nil {
 		return nil, err
 	}
-	unlock, err := target.LockWriter()
+	st, err := r.Workspace.LoadState()
+	if err != nil {
+		return nil, err
+	}
+	expectedPatch := ""
+	if st.Approval != nil && st.Approval.ContractHash != "" {
+		expected, revision, err := r.Workspace.Store.PatchState(st.Cycle, st.Approval.ContractHash)
+		if err != nil {
+			return st, err
+		}
+		if revision > 1 {
+			expectedPatch = expected.Baseline()
+		}
+	}
+	unlock, err := target.LockWriterExpected(expectedPatch)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
 	baseline, err := target.Snapshot()
-	if err != nil {
-		return nil, err
-	}
-	st, err := r.Workspace.LoadState()
 	if err != nil {
 		return nil, err
 	}
@@ -205,12 +164,30 @@ func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved boo
 		return st, err
 	}
 	r.Redactions = st.Intake.Redactions
-	if st.Approval == nil || st.Approval.PlanHash != st.PlanHash || st.Approval.ScopeHash != contentHash(r.Workspace.ReadContext()) || st.Approval.BaselineHash != baseline.Baseline() {
+	if st.Approval == nil || st.Approval.PlanHash != st.PlanHash || st.Approval.ScopeHash != contentHash(r.Workspace.ReadContext()) {
 		return st, fmt.Errorf("approval is stale or incomplete; plan, scope, or repository baseline changed")
 	}
 
+	ctx, finish, err := r.beginWork(ctx, st.Cycle)
+	if err != nil {
+		return st, err
+	}
+	defer func() {
+		if closeErr := finish(); err == nil {
+			err = closeErr
+		}
+	}()
+	r.guard = func() error { return r.checkApproval(st) }
+	defer func() { r.guard = nil }()
+	if err = r.guard(); err != nil {
+		return st, err
+	}
 	plan := r.Workspace.ReadDocument(st.Cycle, "04-plan.md")
-	discussion := r.Workspace.ReadDocument(st.Cycle, "03-discusion.md")
+	discussionBytes, err := (workflow.ArtifactStore{Root: r.Workspace.Root}).Read(r.Workspace.Store, st.Cycle, "discussion-"+st.Approval.ContractHash)
+	if err != nil {
+		return st, err
+	}
+	discussion := string(discussionBytes)
 	context_ := r.Workspace.ReadContext()
 
 	store := r.Workspace.Store
@@ -233,6 +210,21 @@ func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved boo
 				return st, err
 			}
 			st.Tasks[i].Status = rec.Status
+			if rec.Status == workflow.TicketCandidateReady {
+				ref, err := store.CandidateRef(st.Cycle, rec.ID)
+				if err != nil {
+					return st, err
+				}
+				artifact, err := store.GetArtifact(st.Cycle, ref)
+				if err != nil {
+					return st, err
+				}
+				rel, err := filepath.Rel(r.Workspace.CycleDir(st.Cycle), filepath.Join(r.Workspace.Root, filepath.Dir(artifact.Path)))
+				if err != nil {
+					return st, err
+				}
+				st.Tasks[i].Deliverable = filepath.ToSlash(rel)
+			}
 		}
 	}
 
@@ -261,8 +253,19 @@ func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved boo
 			if err := r.claimForRetry(store, st.Cycle, t.ID, holder, claimTTL); err != nil {
 				return st, fmt.Errorf("task %s: %w", t.ID, err)
 			}
+			defer store.ReleaseClaim(st.Cycle, t.ID, holder)
 		}
 
+		r.ticket = t.ID
+		maxAttempts := 0
+		for _, ticket := range st.Plan.Tickets {
+			if ticket.ID == t.ID {
+				maxAttempts = ticket.MaxAttempts
+			}
+		}
+		if err := store.ChargeRepair(st.Cycle, t.ID, maxAttempts); err != nil {
+			return st, err
+		}
 		var taskDesc strings.Builder
 		fmt.Fprintf(&taskDesc, "Vas a ejecutar la tarea %s del plan aprobado.\n\nTítulo: %s\nDescripción: %s\nCriterios de aceptación:\n", t.ID, t.Title, t.Description)
 		for _, c := range t.Criteria {
@@ -279,7 +282,11 @@ func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved boo
 		m.WriteString("\n\n# Código actual\n\n" + repo)
 		m.WriteString("\n\n# Plan aprobado\n\n" + plan)
 		m.WriteString("\n\n# Discusión del equipo\n\n" + discussion)
-		m.WriteString("\n\n# Entregables ya producidos en este ciclo\n\n" + r.previousDeliverables(st.Cycle))
+		previous, err := r.candidateContext(st)
+		if err != nil {
+			return st, err
+		}
+		m.WriteString("\n\n# Entregables ya producidos en este ciclo\n\n" + previous)
 		fmt.Fprintf(&m, "\n\n# Tu tarea: %s\n\nTítulo: %s\nDescripción: %s\nCriterios de aceptación:\n", t.ID, t.Title, t.Description)
 		for _, c := range t.Criteria {
 			fmt.Fprintf(&m, "- %s\n", c)
@@ -298,21 +305,8 @@ Las rutas son relativas a la raíz Git de Yanai y deben empezar con yanai-server
 No generes yanai-ui ni archivos del harness. No escribas rutas absolutas ni "..". Entrega archivos completos,
 nunca fragmentos con "resto igual".`)
 
-		var attemptID string
-		if store != nil {
-			attemptID, err = store.BeginAttempt(workflow.AttemptInput{Cycle: st.Cycle, TicketID: t.ID, Role: t.Owner, Kind: "role_turn", RequestHash: contentHash(m.String())})
-			if err != nil {
-				return st, err
-			}
-		}
 		resp, runErr := r.Run(ctx, t.Owner, m.String())
-		if store != nil {
-			if runErr != nil {
-				_ = store.FailAttempt(attemptID, runErr.Error())
-			} else if err := store.CompleteAttempt(attemptID, contentHash(resp), workflow.Usage{}); err != nil {
-				return st, err
-			}
-		}
+
 		if runErr != nil {
 			if store != nil {
 				_ = store.ReleaseClaim(st.Cycle, t.ID, holder)
@@ -358,14 +352,20 @@ nunca fragmentos con "resto igual".`)
 			return st, validationErr
 		}
 
-		dir := filepath.Join("entregables", t.Owner, t.ID)
-		if _, err := r.Workspace.WriteDocument(st.Cycle, filepath.Join(dir, "respuesta.md"), resp); err != nil {
+		if err := ctx.Err(); err != nil {
+			return st, err
+		}
+		if err := r.guard(); err != nil {
+			return st, err
+		}
+		dir := filepath.Join("entregables", t.Owner, t.ID, contentHash(resp))
+		if err := r.publishCandidate(st.Cycle, "candidate-"+t.ID+"-"+workflow.Digest(filepath.ToSlash(dir)), filepath.Join(dir, "respuesta.md"), resp); err != nil {
 			return st, err
 		}
 		files := ExtractFiles(resp)
 		for _, a := range files {
 			destPath := filepath.Join(dir, "archivos", filepath.FromSlash(a.Path))
-			if _, err := r.Workspace.WriteDocument(st.Cycle, destPath, a.Content); err != nil {
+			if err := r.publishCandidate(st.Cycle, "file-"+t.ID+"-"+workflow.Digest(destPath), destPath, a.Content); err != nil {
 				return st, err
 			}
 		}
@@ -374,11 +374,11 @@ nunca fragmentos con "resto igual".`)
 			if err != nil {
 				return st, err
 			}
-			rec, err = store.ApplyTicketStatus(st.Cycle, t.ID, workflow.TicketCandidateReady, workflow.ActorEngine, rec.StateVersion, workflow.Event{Type: "candidate.ready"})
+			err = store.RecordCandidate(st.Cycle, t.ID, "candidate-"+t.ID+"-"+workflow.Digest(filepath.ToSlash(dir)), rec.StateVersion)
 			if err != nil {
 				return st, err
 			}
-			t.Status = rec.Status
+			t.Status = workflow.TicketCandidateReady
 			_ = store.ReleaseClaim(st.Cycle, t.ID, holder)
 		} else {
 			t.Status = "done"
@@ -410,7 +410,12 @@ nunca fragmentos con "resto igual".`)
 // before the legacy extractor (ExtractFiles) can normalize anything —
 // a path this rejects must never reach the filesystem at all.
 func validateTaskOutput(resp string, contract workflow.Ticket, target *repository.Target) error {
+	seen := map[string]bool{}
 	for _, match := range reFile.FindAllStringSubmatch(resp, -1) {
+		if seen[match[1]] {
+			return fmt.Errorf("task %s output: duplicate path", contract.ID)
+		}
+		seen[match[1]] = true
 		expected := false
 		for _, output := range contract.Outputs {
 			if match[1] == output {
@@ -422,6 +427,11 @@ func validateTaskOutput(resp string, contract workflow.Ticket, target *repositor
 		}
 		if err := target.CheckPath(match[1]); err != nil {
 			return fmt.Errorf("task %s output: %w", contract.ID, err)
+		}
+	}
+	for _, output := range contract.Outputs {
+		if !seen[output] {
+			return fmt.Errorf("task %s output: missing declared file %s", contract.ID, output)
 		}
 	}
 	return nil
@@ -436,6 +446,12 @@ func (r *Runner) claimForRetry(store *workflow.Store, cycle int, ticketID, holde
 	if err != nil {
 		return err
 	}
+	if rec.Status == workflow.TicketResponseRecorded {
+		rec, err = store.ApplyTicketStatus(cycle, ticketID, workflow.TicketResponseRejected, workflow.ActorEngine, rec.StateVersion, workflow.Event{Type: "candidate.interrupted"})
+		if err != nil {
+			return err
+		}
+	}
 	if rec.Status == workflow.TicketResponseRejected {
 		rec, err = store.ApplyTicketStatus(cycle, ticketID, workflow.TicketPending, workflow.ActorEngine, rec.StateVersion, workflow.Event{Type: "retry"})
 		if err != nil {
@@ -444,31 +460,6 @@ func (r *Runner) claimForRetry(store *workflow.Store, cycle int, ticketID, holde
 	}
 	_, _, err = store.ClaimTicket(cycle, ticketID, holder, ttl, workflow.Event{})
 	return err
-}
-
-func (r *Runner) previousDeliverables(cycle int) string {
-	root := filepath.Join(r.Workspace.CycleDir(cycle), "entregables")
-	var b strings.Builder
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		rel, _ := filepath.Rel(root, path)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		text := string(data)
-		if len(text) > 12000 {
-			text = text[:12000] + "\n… (recortado)"
-		}
-		fmt.Fprintf(&b, "### %s\n\n```\n%s\n```\n\n", filepath.ToSlash(rel), text)
-		return nil
-	})
-	if b.Len() == 0 {
-		return "_(ninguno todavía)_"
-	}
-	return b.String()
 }
 
 // repoIndex returns the compressed repository map (tree + SPEC.md),

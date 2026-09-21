@@ -39,6 +39,10 @@ COMMANDS
   analyze --privacy-reviewed <file|->   Validate reviewed evidence and decide direction
   discuss   [--retry-unresolved]   Team working session and the PO's consolidated plan
   status    [--json] [--attempts]   Shows where the current cycle stands
+  review                    Prints the full executable contract and cycle budget
+  policy    [--note ...]     Shows budget; with a note adopts configured policy explicitly
+  invalidate --note ...     Revokes approval so discuss can prepare a revised plan
+  reconcile-attempt --id ID --cost-usd N --tokens N --reference ...
   approve   [--note ...]    Human gate: authorizes implementation
   reject    --note "..."    Sends the plan back to the team with a reason
   run       [--task ID] [--retry-unresolved]   Runs the approved tasks (only after 'approve')
@@ -86,6 +90,14 @@ func run() error {
 		return cmdDiscuss(args)
 	case "status":
 		return cmdStatus(args)
+	case "review":
+		return cmdReview(args)
+	case "policy":
+		return cmdPolicy(args)
+	case "invalidate":
+		return cmdInvalidate(args)
+	case "reconcile-attempt":
+		return cmdReconcileAttempt(args)
 	case "approve":
 		return cmdApprove(args)
 	case "reject":
@@ -175,7 +187,7 @@ func cmdInit(args []string) error {
 Next steps:
   1. Edit context/alcance.md — this is what the Product Owner uses to reject
      what falls outside the project.
-  2. Review yanai.config.json: the repo path and each agent's model.
+  2. Review yanai.config.json: repo, models, and explicit execution limits, prices and checks.
   3. export OPENROUTER_API_KEY=sk-or-...
   4. yanai analyze interviews/my-interview.md
 `)
@@ -325,6 +337,10 @@ func attachStore(w *ws.Workspace, cfg *config.Config, allowLegacy bool) (func(),
 		}
 	}
 	if _, err := store.ExpireClaims(); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if err := store.RecoverSessions(); err != nil {
 		cleanup()
 		return nil, err
 	}
@@ -555,6 +571,12 @@ func cmdStatus(args []string) error {
 	if st.Verdict != "" {
 		fmt.Printf("Verdict: %s\n", st.Verdict)
 	}
+	if w.Store != nil {
+		if budget, err := w.Store.Budget(st.Cycle); err == nil {
+			data, _ := json.MarshalIndent(budget, "", "  ")
+			fmt.Printf("Budget:\n%s\n", data)
+		}
+	}
 	fmt.Printf("Folder:  %s\n", w.CycleDir(st.Cycle))
 	printTasks(st)
 	fmt.Printf("\nHistory:\n")
@@ -577,7 +599,7 @@ func printUnresolvedAttempts(w *ws.Workspace) error {
 		fmt.Println("No workflow store attached; nothing to report.")
 		return nil
 	}
-	unresolved, err := w.Store.UnresolvedAttempts()
+	unresolved, err := w.Store.UnreconciledAttempts()
 	if err != nil {
 		return err
 	}
@@ -585,14 +607,14 @@ func printUnresolvedAttempts(w *ws.Workspace) error {
 		fmt.Println("No unresolved attempts.")
 		return nil
 	}
-	fmt.Printf("%d unresolved attempt(s) from an interrupted process; the model call may already have been billed:\n\n", len(unresolved))
+	fmt.Printf("%d attempt(s) with unresolved billing, usage, or dispatch:\n\n", len(unresolved))
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "  ID\tCYCLE\tTICKET\tROLE\tSTARTED")
+	fmt.Fprintln(tw, "  ID\tCYCLE\tTICKET\tROLE\tSTATE\tCOST KNOWN\tUSAGE KNOWN")
 	for _, a := range unresolved {
-		fmt.Fprintf(tw, "  %s\t%03d\t%s\t%s\t%s\n", a.ID, a.Cycle, a.TicketID, a.Role, a.StartedAt.Format("2006-01-02 15:04"))
+		fmt.Fprintf(tw, "  %s\t%03d\t%s\t%s\t%s\t%t\t%t\n", a.ID, a.Cycle, a.TicketID, a.Role, a.State, a.CostKnown, a.UsageKnown)
 	}
 	tw.Flush()
-	fmt.Println("\nRerun the interrupted command with --retry-unresolved to acknowledge and proceed.")
+	fmt.Println("\nReconcile missing billing/usage with reconcile-attempt, then acknowledge uncertain dispatch using --retry-unresolved.")
 	return nil
 }
 
@@ -660,6 +682,7 @@ func cmdApprove(args []string) error {
 	fs := flag.NewFlagSet("approve", flag.ExitOnError)
 	path := wsPath(fs)
 	note := fs.String("note", "", "optional comment")
+	expected := fs.String("contract", "", "contract hash from yanai review")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -668,7 +691,16 @@ func cmdApprove(args []string) error {
 		return err
 	}
 	defer cleanup()
-	st, err := r.Approve(*note)
+	review, err := r.Review()
+	if err != nil {
+		return err
+	}
+	fmt.Print(review)
+	reviewedHash := strings.TrimPrefix(strings.SplitN(review, "\n", 2)[0], "Contract: ")
+	if *expected != "" && *expected != reviewedHash {
+		return fmt.Errorf("contract differs from the reviewed hash; review again")
+	}
+	st, err := r.Approve(*note, reviewedHash)
 	if err != nil {
 		return err
 	}

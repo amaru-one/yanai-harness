@@ -4,8 +4,8 @@ package repository
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
+	"github.com/yanai/yanai-harness/internal/workflow"
 	"io"
 	"os"
 	"os/exec"
@@ -151,12 +151,7 @@ func DiscoverSibling(starts ...string) (string, error) {
 	return "", fmt.Errorf("cannot locate the harness's sibling Yanai checkout; pass --repo /path/to/yanai")
 }
 
-type Snapshot struct {
-	Root      string
-	CommonDir string
-	Head      string
-	Dirty     bool
-}
+type Snapshot = workflow.RepositoryState
 
 func (t *Target) Snapshot() (Snapshot, error) {
 	head, err := t.git("rev-parse", "--verify", "HEAD^{commit}")
@@ -167,22 +162,40 @@ func (t *Target) Snapshot() (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{Root: t.Root, CommonDir: t.CommonDir, Head: strings.TrimSpace(head), Dirty: status != ""}, nil
-}
-
-// Baseline deliberately differs between checkouts with the same HEAD. Dirty
-// snapshots are labelled for planning only; they can never authorize execution.
-func (s Snapshot) Baseline() string {
-	data, _ := json.Marshal(s)
-	return fmt.Sprintf("%x", sha256.Sum256(data))
-}
-
-func (s Snapshot) Label() string {
-	state := "clean"
-	if s.Dirty {
-		state = "DIRTY — planning only; run requires a clean checkout and a new plan"
+	index, err := t.git("ls-files", "--stage", "-z")
+	if err != nil {
+		return Snapshot{}, err
 	}
-	return fmt.Sprintf("Repository: %s\nModule: %s\nHEAD: %s\nWorking tree: %s\n", s.Root, ModuleDir, s.Head, state)
+	names, err := t.git("ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return Snapshot{}, err
+	}
+	content := map[string]string{}
+	fingerprintTarget := *t
+	fingerprintTarget.repo.AllowedPaths = []string{"AGENTS.md", "yanai-server"}
+	fingerprintTarget.repo.ExcludeDirs = nil
+	for _, path := range strings.Split(names, "\x00") {
+		if path == "" || fingerprintTarget.CheckPath(path) != nil {
+			continue
+		}
+		info, err := os.Lstat(filepath.Join(t.Root, filepath.FromSlash(path)))
+		if os.IsNotExist(err) {
+			content[path] = "deleted"
+			continue
+		}
+		if err != nil {
+			return Snapshot{}, err
+		}
+		data, err := fingerprintTarget.ReadFile(path, int(info.Size())+1)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if int64(len(data)) != info.Size() {
+			return Snapshot{}, fmt.Errorf("file changed during fingerprint: %s", path)
+		}
+		content[path] = fmt.Sprintf("%o:%x", info.Mode().Perm(), sha256.Sum256(data))
+	}
+	return Snapshot{Root: t.Root, CommonDir: t.CommonDir, Head: strings.TrimSpace(head), Dirty: status != "", Content: content, IndexHash: fmt.Sprintf("%x", sha256.Sum256([]byte(index))), StatusHash: fmt.Sprintf("%x", sha256.Sum256([]byte(status)))}, nil
 }
 
 func cleanRelative(path string) error {

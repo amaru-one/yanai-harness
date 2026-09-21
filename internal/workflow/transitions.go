@@ -73,6 +73,8 @@ func init() {
 	allow(PhaseRejected, append([]string{PhaseAwaitingApproval}, TerminalPhases...), ActorEngine)
 	// The human gate. Nothing else may reach either side of it.
 	allow(PhaseAwaitingApproval, []string{PhaseApproved, PhaseRejected}, ActorHuman)
+	allow(PhaseApproved, []string{PhaseRejected}, ActorHuman)
+	allow(PhaseAwaitingExecution, []string{PhaseRejected}, ActorHuman)
 	// Execute's outcome, once every ticket has left "pending".
 	allow(PhaseApproved, []string{PhaseAwaitingExecution}, ActorEngine)
 }

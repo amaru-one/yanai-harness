@@ -19,7 +19,7 @@ import (
 
 // Analyze snapshots local provenance before any model call. Only Public()
 // source data goes into prompts; raw intake never enters shared cycle history.
-func (r *Runner) Analyze(ctx context.Context, raw string, intake workflow.Intake) (*ws.State, error) {
+func (r *Runner) Analyze(ctx context.Context, raw string, intake workflow.Intake) (result *ws.State, err error) {
 	if !intake.PrivacyReviewed || intake.OriginalHash != workflow.Digest(raw) {
 		return nil, fmt.Errorf("intake must be privacy-reviewed and match its source")
 	}
@@ -46,8 +46,10 @@ func (r *Runner) Analyze(ctx context.Context, raw string, intake workflow.Intake
 	// scope is legitimately new work, which is why scope.Revision is part
 	// of the key rather than something a replay ignores.
 	var cmdKey string
+	var st *ws.State
 	if r.Workspace.Store != nil {
-		cmdKey = contentHash(r.Workspace.Store.Project() + "|analyze|" + intake.OriginalHash + "|" + scope.Revision + "|" + baseline.Head)
+		sourceHash, _ := workflow.Hash(intake.Public())
+		cmdKey = contentHash(r.Workspace.Store.Project() + "|analyze|" + intake.OriginalHash + "|" + sourceHash + "|" + scope.Revision + "|" + baseline.Baseline())
 		if result, found, err := r.Workspace.Store.CheckCommand(cmdKey); err != nil {
 			return nil, err
 		} else if found {
@@ -58,9 +60,30 @@ func (r *Runner) Analyze(ctx context.Context, raw string, intake workflow.Intake
 		}
 	}
 
-	st, err := r.Workspace.NewCycle(intake.Origin)
-	if err != nil {
-		return nil, err
+	if r.Workspace.Store != nil {
+		pending, found, err := r.Workspace.Store.CheckCommand("analysis-start/" + cmdKey)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			var n int
+			if _, err = fmt.Sscanf(pending, "%d", &n); err != nil {
+				return nil, err
+			}
+			st, err = r.Workspace.LoadCycleState(n)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	fresh := st == nil
+	if fresh {
+		st, err = r.Workspace.NewCycle(intake.Origin)
+		if err != nil {
+			return nil, err
+		}
+	} else if st.Phase != workflow.PhaseNoCycle {
+		return st, nil
 	}
 	st.SchemaVersion = "1"
 	st.Intake = &intake
@@ -72,6 +95,11 @@ func (r *Runner) Analyze(ctx context.Context, raw string, intake workflow.Intake
 	if err = r.Workspace.SaveState(st, workflow.ActorEngine); err != nil {
 		return nil, err
 	}
+	if fresh && r.Workspace.Store != nil {
+		if err = r.Workspace.Store.RecordCommand("analysis-start/"+cmdKey, "analysis-start", fmt.Sprint(st.Cycle)); err != nil {
+			return st, err
+		}
+	}
 	r.Redactions = intake.Redactions
 	c, err := r.decisionContext(st)
 	if err != nil {
@@ -81,6 +109,16 @@ func (r *Runner) Analyze(ctx context.Context, raw string, intake workflow.Intake
 	if len(intake.Excerpts) == 0 {
 		p = workflow.Proposal{SchemaVersion: "1", ID: "analysis", Origin: intake.Origin, Outcome: workflow.OutcomeNeedsEvidence, Summary: "No source evidence was supplied.", Scope: []string{scope.Requirements[0].ID}, Inputs: c.Inputs, Questions: []string{"What teacher evidence or explicit technical finding should this cycle assess?"}, Rationale: "The input is empty."}
 	} else {
+		var finish func() error
+		ctx, finish, err = r.beginWork(ctx, st.Cycle)
+		if err != nil {
+			return st, err
+		}
+		defer func() {
+			if closeErr := finish(); err == nil {
+				err = closeErr
+			}
+		}()
 		public, _ := json.Marshal(c.Source)
 		repo, err := r.repoContextFor(ctx, config.RolePO, "Analyze this reviewed source; distinguish evidence from inference:\n"+string(public))
 		if err != nil {
@@ -116,7 +154,7 @@ func (r *Runner) Analyze(ctx context.Context, raw string, intake workflow.Intake
 	return st, nil
 }
 
-func (r *Runner) Discuss(ctx context.Context, retryUnresolved bool) (*ws.State, error) {
+func (r *Runner) Discuss(ctx context.Context, retryUnresolved bool) (result *ws.State, err error) {
 	if err := r.checkUnresolvedAttempts(retryUnresolved); err != nil {
 		return nil, err
 	}
@@ -152,7 +190,7 @@ func (r *Runner) Discuss(ctx context.Context, retryUnresolved bool) (*ws.State, 
 		cmdKey = contentHash(fmt.Sprintf("%s|discuss|%d|%s|%s|%s", r.Workspace.Store.Project(), st.Cycle, proposalHash, contentHash(r.Workspace.ReadContext()), baseline.Baseline()))
 		if result, found, err := r.Workspace.Store.CheckCommand(cmdKey); err != nil {
 			return st, err
-		} else if found && result == "done" {
+		} else if found && result == "done" && st.Phase != ws.PhaseRejected {
 			return r.Workspace.LoadCycleState(st.Cycle)
 		}
 	}
@@ -174,6 +212,15 @@ func (r *Runner) Discuss(ctx context.Context, retryUnresolved bool) (*ws.State, 
 	st.BaseCommit = baseline.Head
 	r.Redactions = st.Intake.Redactions
 
+	ctx, finish, err := r.beginWork(ctx, st.Cycle)
+	if err != nil {
+		return st, err
+	}
+	defer func() {
+		if closeErr := finish(); err == nil {
+			err = closeErr
+		}
+	}()
 	proposal := workflow.RenderProposal(*st.Proposal)
 	transcript := ""
 	for _, role := range r.Cfg.DiscussionOrder {
@@ -268,7 +315,7 @@ func (r *Runner) checkUnresolvedAttempts(retryUnresolved bool) error {
 		for _, a := range unresolved {
 			fmt.Fprintf(&b, "  %s  cycle %03d  ticket %s  role %s  started %s\n", a.ID, a.Cycle, a.TicketID, a.Role, a.StartedAt.Format("2006-01-02 15:04"))
 		}
-		b.WriteString("Inspect: yanai status --attempts\nThen: rerun with --retry-unresolved to acknowledge and proceed.")
+		b.WriteString("Inspect: yanai status --attempts\nThen: reconcile billing with reconcile-attempt, then rerun with --retry-unresolved.")
 		return errors.New(b.String())
 	}
 	for _, a := range unresolved {
@@ -352,7 +399,11 @@ func (r *Runner) decide(ctx context.Context, c workflow.DecisionContext, task st
 	roles, _ := json.Marshal(r.roles())
 	message := "DECISION_JSON\nDECISION_CONTEXT_JSON\n" + string(data) + "\nEND_DECISION_CONTEXT\nRoles: " + string(roles) + "\n" + task + "\n" + decisionInstructions
 	var validation error
+	repairKey := "decision-" + contentHash(message)
 	for attempt := 0; attempt < 2; attempt++ {
+		if err := r.Workspace.Store.ChargeRepair(r.cycle, repairKey, 2); err != nil {
+			return workflow.Proposal{}, err
+		}
 		reply, err := r.Run(ctx, config.RolePO, message)
 		if err != nil {
 			return workflow.Proposal{}, err
