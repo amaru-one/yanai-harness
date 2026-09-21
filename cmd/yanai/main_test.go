@@ -54,6 +54,7 @@ func TestInitSiblingAndExistingConfigurationAcrossWorkingDirectories(t *testing.
 	if err := cmdInit([]string{"--ws", workspace}); err != nil {
 		t.Fatal(err)
 	}
+	configureExecution(t, workspace)
 	canonical, err := repository.Canonical(app)
 	if err != nil {
 		t.Fatal(err)
@@ -108,6 +109,7 @@ func TestInitSiblingAndExistingConfigurationAcrossWorkingDirectories(t *testing.
 	if err := cmdInit([]string{"--ws", workspace}); err != nil {
 		t.Fatal(err)
 	}
+	configureExecution(t, workspace)
 	t.Chdir(harness)
 	if err := cmdInit([]string{"--ws", workspace, "--repo", "../yanai"}); err != nil {
 		t.Fatal(err)
@@ -131,6 +133,7 @@ func TestInitRepairsLegacyBindingOnlyWhenExplicit(t *testing.T) {
 	if err := cmdInit([]string{"--ws", workspace}); err != nil {
 		t.Fatal(err)
 	}
+	configureExecution(t, workspace)
 	if err := config.SetRepoPath(workspace, "../app-docente"); err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +182,7 @@ func approvedCycle(t *testing.T) (app, workspace string) {
 	if err := cmdInit([]string{"--ws", workspace}); err != nil {
 		t.Fatal(err)
 	}
+	configureExecution(t, workspace)
 	interview := filepath.Join(workspace, "interviews/test.md")
 	put(t, interview, "A teacher wants less repeated writing.")
 	if err := cmdAnalyze([]string{"--ws", workspace, "--privacy-reviewed", interview}); err != nil {
@@ -235,8 +239,9 @@ func TestMockCLIUsesBindingAndGuardsRun(t *testing.T) {
 	if err := cmdRun([]string{"--ws", workspace}); err != nil {
 		t.Fatal(err)
 	}
+	st := load(t, workspace)
 	// Step 3 still stages candidates. Step 8 will apply verified patches.
-	if _, err := os.Stat(filepath.Join(workspace, "cycles/001/entregables/ingeniero/T-003/archivos/yanai-server/ejemplo.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(workspace, "cycles/001", st.Tasks[2].Deliverable, "archivos/yanai-server/ejemplo.md")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(app, "yanai-server/ejemplo.md")); !os.IsNotExist(err) {
@@ -257,11 +262,12 @@ func TestRunRejectsDifferentCheckoutWithSameHEAD(t *testing.T) {
 }
 
 func TestRunRejectsForbiddenModelOutputBeforeStaging(t *testing.T) {
-	_, workspace := approvedCycle(t)
 	t.Setenv("YANAI_MOCK", "")
 	t.Setenv("OPENROUTER_API_KEY", "local-test")
 	for _, path := range []string{"yanai-ui/view.svelte", "../yanai-server/leak.go", "yanai-server/.env", "yanai-server/../../outside"} {
 		t.Run(path, func(t *testing.T) {
+			_, workspace := approvedCycle(t)
+			t.Setenv("YANAI_MOCK", "")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				defer r.Body.Close()
 				var req struct {
@@ -278,7 +284,7 @@ func TestRunRejectsForbiddenModelOutputBeforeStaging(t *testing.T) {
 				if strings.Contains(req.Messages[len(req.Messages)-1].Content, "TAREA_DE_EJECUCION") {
 					content = "=== ARCHIVO: " + path + " ===\nforbidden\n=== FIN ARCHIVO ===\n"
 				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": content}}}})
+				_ = json.NewEncoder(w).Encode(map[string]any{"usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10, "cost": 0.001}, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": content}}}})
 			}))
 			defer server.Close()
 			name := filepath.Join(workspace, "yanai.config.json")
@@ -296,6 +302,12 @@ func TestRunRejectsForbiddenModelOutputBeforeStaging(t *testing.T) {
 				t.Fatal(err)
 			}
 			put(t, name, string(data))
+			if err := cmdPolicy([]string{"--ws", workspace, "--note", "review changed provider"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := cmdApprove([]string{"--ws", workspace}); err != nil {
+				t.Fatal(err)
+			}
 			if err := cmdRun([]string{"--ws", workspace}); err == nil || !strings.Contains(err.Error(), "output:") {
 				t.Fatalf("forbidden output: %v", err)
 			}

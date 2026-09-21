@@ -559,9 +559,9 @@ func (s *Store) ApplyTicketStatus(cycle int, id, to, actor string, expectedVersi
 
 // ---- Approvals ----
 
-// RecordApproval commits the human's approval. It does not itself change any
-// cycle phase — the caller pairs it with ApplyCyclePhase(..., PhaseApproved,
-// ActorHuman, ...) — but it is the durable record of who approved what.
+// RecordApproval preserves historical approval records only. It cannot set
+// the active contract and never authorizes execution. Live approval must use
+// ApproveContract so the binding and phase transition commit atomically.
 func (s *Store) RecordApproval(a Approval) error {
 	if a.ID == "" || a.Actor == "" || a.PlanHash == "" || a.ScopeHash == "" || a.Baseline == "" {
 		return errors.New("approval requires id, actor, plan, scope, and baseline hashes")

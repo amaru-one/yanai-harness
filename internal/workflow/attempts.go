@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"database/sql"
 	"errors"
 	"time"
 )
@@ -43,6 +44,11 @@ type Attempt struct {
 	ResponseHash     string
 	State            string
 	CostKnown        bool
+	UsageKnown       bool
+	CostUSD          *float64
+	ProviderID       string
+	FinishReason     string
+	Acknowledged     bool
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
@@ -66,7 +72,7 @@ func (s *Store) BeginAttempt(a AttemptInput) (string, error) {
 // in_flight, so it cannot resurrect an attempt reconciliation already
 // stamped unknown.
 func (s *Store) CompleteAttempt(id, responseHash string, usage Usage) error {
-	res, err := s.db.Exec(`UPDATE workflow_attempts SET state = ?, response_hash = ?, cost_known = 1, prompt_tokens = ?, completion_tokens = ?, total_tokens = ?, ended_at = ?
+	res, err := s.db.Exec(`UPDATE workflow_attempts SET state = ?, response_hash = ?, cost_known = 0, usage_known = 1, prompt_tokens = ?, completion_tokens = ?, total_tokens = ?, ended_at = ?
 		WHERE id = ? AND project = ? AND state = ?`,
 		AttemptCompleted, responseHash, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, now(), id, s.project, AttemptInFlight)
 	if err != nil {
@@ -108,6 +114,13 @@ func (s *Store) GetAttempt(id string) (Attempt, error) {
 	a.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 	if ended != "" {
 		a.EndedAt, _ = time.Parse(time.RFC3339Nano, ended)
+	}
+	var cost sql.NullFloat64
+	if err := s.db.QueryRow(`SELECT cost_usd,usage_known,provider_id,finish_reason,acknowledged FROM workflow_attempts WHERE project=? AND id=?`, s.project, id).Scan(&cost, &a.UsageKnown, &a.ProviderID, &a.FinishReason, &a.Acknowledged); err != nil {
+		return Attempt{}, err
+	}
+	if cost.Valid {
+		a.CostUSD = &cost.Float64
 	}
 	return a, nil
 }
@@ -199,13 +212,53 @@ func (s *Store) UnresolvedAttempts() ([]Attempt, error) {
 // acknowledged the risk (the CLI's --retry-unresolved flag), so it stops
 // blocking future runs. It is never called automatically.
 func (s *Store) ResolveAttempt(id string) error {
-	res, err := s.db.Exec(`UPDATE workflow_attempts SET state = ? WHERE id = ? AND project = ? AND state = ?`,
-		AttemptFailed, id, s.project, AttemptUnknown)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE workflow_attempts SET state='failed',acknowledged=1 WHERE id=? AND project=? AND state='unknown'`, id, s.project)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
 		return errors.New("attempt is not in the unknown state")
 	}
-	return nil
+	if err = s.appendEventTx(tx, Event{Actor: ActorHuman, Type: "attempt.retry_acknowledged", Payload: id}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// UnreconciledAttempts includes successful responses with absent billing, not
+// only interrupted calls. The local status command must expose both.
+func (s *Store) UnreconciledAttempts() ([]Attempt, error) {
+	rows, err := s.db.Query(`SELECT id FROM workflow_attempts WHERE project=? AND (cost_known=0 OR usage_known=0 OR state='unknown') ORDER BY started_at`, s.project)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	var result []Attempt
+	for _, id := range ids {
+		a, err := s.GetAttempt(id)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, a)
+	}
+	return result, nil
 }

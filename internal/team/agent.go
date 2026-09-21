@@ -22,6 +22,9 @@ type Runner struct {
 	Workspace  *ws.Workspace
 	Verbose    bool
 	Redactions []string
+	cycle      int
+	ticket     string
+	guard      func() error
 }
 
 // Run calls the role's model with its system prompt and the given message.
@@ -39,7 +42,16 @@ func (r *Runner) Run(ctx context.Context, role, message string) (string, error) 
 		{Role: "system", Content: workflow.Redact(string(system), r.Redactions)},
 		{Role: "user", Content: workflow.Redact(message, r.Redactions)},
 	}
-	text, usage, err := r.Client.Chat(ctx, ag.Model, msgs, ag.Temperature, ag.MaxTokens)
+	kind := "role_turn"
+	switch {
+	case strings.HasPrefix(message, "SELECCIONA_ARCHIVOS"):
+		kind = "select_files"
+	case strings.HasPrefix(message, "DECISION_JSON"):
+		kind = "decision"
+	case strings.HasPrefix(message, "TAREA_DE_EJECUCION"):
+		kind = "candidate"
+	}
+	text, usage, err := r.Client.Chat(ctx, ag.Model, msgs, ag.Temperature, ag.MaxTokens, r.observer(ctx, role, ag.Model, kind, ag.MaxTokens))
 	if err != nil {
 		return "", fmt.Errorf("%s failed: %w", ag.Name, err)
 	}

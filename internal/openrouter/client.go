@@ -26,10 +26,27 @@ type Message struct {
 
 // Usage reports the token consumption of a call.
 type Usage struct {
-	PromptTokens     int     `json:"prompt_tokens"`
-	CompletionTokens int     `json:"completion_tokens"`
-	TotalTokens      int     `json:"total_tokens"`
-	Cost             float64 `json:"cost"`
+	PromptTokens     int      `json:"prompt_tokens"`
+	CompletionTokens int      `json:"completion_tokens"`
+	TotalTokens      int      `json:"total_tokens"`
+	Cost             *float64 `json:"cost"`
+	Complete         bool     `json:"-"`
+}
+
+func (u *Usage) UnmarshalJSON(data []byte) error {
+	type plain Usage
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*u = Usage(value)
+	has := func(key string) bool { v, ok := fields[key]; return ok && string(v) != "null" }
+	u.Complete = has("prompt_tokens") && has("completion_tokens") && has("total_tokens") && u.TotalTokens >= u.PromptTokens+u.CompletionTokens
+	return nil
 }
 
 // Client talks to OpenRouter.
@@ -77,41 +94,53 @@ type request struct {
 }
 
 type response struct {
+	ID      string `json:"id"`
 	Choices []struct {
 		Message      Message `json:"message"`
 		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
-	Usage Usage `json:"usage"`
+	Usage *Usage `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 		Code    any    `json:"code"`
 	} `json:"error"`
 }
 
-// Chat sends the messages to the model and returns the response text.
-func (c *Client) Chat(ctx context.Context, model string, msgs []Message, temp float64, maxTokens int) (string, Usage, error) {
-	if c.mock {
-		return mockResponse(model, msgs), Usage{}, nil
-	}
+// Observer brackets every physical request, including retries, with durable accounting.
+type Observer struct {
+	Before func([]byte) error
+	After  func(Result) error
+}
+type Result struct {
+	Text         string
+	Usage        Usage
+	UsageKnown   bool
+	ProviderID   string
+	FinishReason string
+	Err          error
+	Uncertain    bool
+}
 
-	body, err := json.Marshal(request{
-		Model: model, Messages: msgs, Temperature: temp, MaxTokens: maxTokens,
-	})
+func (c *Client) Chat(ctx context.Context, model string, msgs []Message, temp float64, maxTokens int, o Observer) (string, Usage, error) {
+	if o.Before == nil || o.After == nil {
+		return "", Usage{}, fmt.Errorf("provider requests require accounting hooks")
+	}
+	body, err := json.Marshal(request{Model: model, Messages: msgs, Temperature: temp, MaxTokens: maxTokens})
 	if err != nil {
 		return "", Usage{}, err
 	}
-
-	var lastErr error
 	for attempt := 0; attempt <= c.retries; attempt++ {
 		if attempt > 0 {
-			wait := time.Duration(1<<attempt)*time.Second + time.Duration(rand.Intn(500))*time.Millisecond
+			wait := time.Duration(1<<min(attempt, 6))*time.Second + time.Duration(rand.Intn(500))*time.Millisecond
 			select {
 			case <-ctx.Done():
 				return "", Usage{}, ctx.Err()
 			case <-time.After(wait):
 			}
 		}
-
+		if err = ctx.Err(); err != nil {
+			return "", Usage{}, err
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
 		if err != nil {
 			return "", Usage{}, err
@@ -124,50 +153,68 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, temp fl
 		if c.title != "" {
 			req.Header.Set("X-Title", c.title)
 		}
-
-		resp, err := c.http.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
+		if o.Before != nil {
+			if err = o.Before(body); err != nil {
+				return "", Usage{}, err
+			}
 		}
-		data, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
+		result := Result{}
+		retry := false
+		if c.mock {
+			zero := 0.0
+			result = Result{Text: mockResponse(model, msgs), Usage: Usage{Cost: &zero}, UsageKnown: true, FinishReason: "mock"}
+		} else {
+			resp, callErr := c.http.Do(req)
+			if callErr != nil {
+				result.Err = callErr
+				result.Uncertain = true
+			} else {
+				data, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+				resp.Body.Close()
+				var parsed response
+				if readErr != nil {
+					result.Err = readErr
+					result.Uncertain = true
+				} else if err = json.Unmarshal(data, &parsed); err != nil {
+					result.Err = fmt.Errorf("unreadable provider response: %w", err)
+					result.Uncertain = true
+				} else {
+					result.ProviderID = parsed.ID
+					if parsed.Usage != nil {
+						result.Usage = *parsed.Usage
+						result.UsageKnown = parsed.Usage.Complete
+					}
+					if len(parsed.Choices) > 0 {
+						result.Text = strings.TrimSpace(parsed.Choices[0].Message.Content)
+						result.FinishReason = parsed.Choices[0].FinishReason
+					}
+					switch {
+					case resp.StatusCode != http.StatusOK:
+						result.Err = fmt.Errorf("openrouter returned %d", resp.StatusCode)
+						retry = resp.StatusCode == 429 || resp.StatusCode >= 500
+					case parsed.Error != nil:
+						result.Err = fmt.Errorf("openrouter: %s", parsed.Error.Message)
+					case result.FinishReason == "length":
+						result.Err = fmt.Errorf("openrouter response was truncated at the token limit")
+					case result.Text == "":
+						result.Err = fmt.Errorf("the model returned empty text")
+					}
+				}
+			}
 		}
-
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("openrouter returned %d: %s", resp.StatusCode, truncate(string(data), 400))
-			continue
+		if o.After != nil {
+			if err = o.After(result); err != nil {
+				return "", result.Usage, err
+			}
 		}
-		if resp.StatusCode != http.StatusOK {
-			return "", Usage{}, fmt.Errorf("openrouter returned %d: %s", resp.StatusCode, truncate(string(data), 800))
+		if result.Err == nil {
+			return result.Text, result.Usage, nil
 		}
-
-		var r response
-		if err := json.Unmarshal(data, &r); err != nil {
-			lastErr = fmt.Errorf("unreadable response: %w", err)
-			continue
+		if result.Uncertain || !retry || attempt == c.retries {
+			return "", result.Usage, result.Err
 		}
-		if r.Error != nil {
-			return "", Usage{}, fmt.Errorf("openrouter: %s", r.Error.Message)
-		}
-		if len(r.Choices) == 0 {
-			lastErr = fmt.Errorf("openrouter did not return any response")
-			continue
-		}
-		if r.Choices[0].FinishReason == "length" {
-			return "", Usage{}, fmt.Errorf("openrouter response was truncated at the token limit")
-		}
-		text := strings.TrimSpace(r.Choices[0].Message.Content)
-		if text == "" {
-			lastErr = fmt.Errorf("the model returned empty text")
-			continue
-		}
-		return text, r.Usage, nil
 	}
-	return "", Usage{}, fmt.Errorf("failed after %d attempts: %w", c.retries+1, lastErr)
+	return "", Usage{}, fmt.Errorf("retry limit exhausted")
 }
 
 func truncate(s string, n int) string {

@@ -156,6 +156,12 @@ func TestUnresolvedAttemptBlocksRunAndDiscussUntilAcknowledged(t *testing.T) {
 		t.Fatalf("discuss should refuse on an unresolved attempt: %v", err)
 	}
 
+	if err := cmdRun([]string{"--ws", workspace, "--retry-unresolved"}); err == nil || !strings.Contains(err.Error(), "billing") {
+		t.Fatalf("acknowledgement bypassed billing: %v", err)
+	}
+	if err := cmdReconcileAttempt([]string{"--ws", workspace, "--id", id, "--cost-usd", "0.1", "--tokens", "10", "--reference", "test invoice"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := cmdRun([]string{"--ws", workspace, "--retry-unresolved"}); err != nil {
 		t.Fatalf("run --retry-unresolved: %v", err)
 	}

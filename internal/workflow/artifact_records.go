@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -118,4 +119,62 @@ func (s *Store) DropPendingArtifact(cycle int, refID string) error {
 	_, err := s.db.Exec(`DELETE FROM workflow_artifacts WHERE project = ? AND cycle = ? AND ref_id = ? AND state = 'pending'`,
 		s.project, cycle, refID)
 	return err
+}
+
+// RecordCandidate commits the artifact reference with candidate_ready, so a
+// crash before the JSON projection cannot lose the only reference to the output.
+func (s *Store) RecordCandidate(cycle int, ticket, ref string, expected int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var published string
+	if err = tx.QueryRow(`SELECT state FROM workflow_artifacts WHERE project=? AND cycle=? AND ref_id=?`, s.project, cycle, ref).Scan(&published); err != nil {
+		return err
+	}
+	if published != "published" {
+		return errors.New("candidate artifact is not published")
+	}
+	res, err := tx.Exec(`UPDATE workflow_tickets SET status='candidate_ready',state_version=state_version+1 WHERE project=? AND cycle=? AND id=? AND state_version=? AND status='response_recorded' AND legacy=0`, s.project, cycle, ticket, expected)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return &ErrStaleVersion{Kind: "ticket", Expected: expected}
+	}
+	_, err = tx.Exec(`INSERT INTO workflow_candidates(project,cycle,ticket,ref) VALUES(?,?,?,?) ON CONFLICT(project,cycle,ticket) DO UPDATE SET ref=excluded.ref`, s.project, cycle, ticket, ref)
+	if err != nil {
+		return err
+	}
+	if err = s.appendEventTx(tx, Event{Cycle: cycle, TicketID: ticket, Actor: ActorEngine, Type: "candidate.ready", Payload: ref}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+func (s *Store) CandidateRef(cycle int, ticket string) (string, error) {
+	var ref string
+	err := s.db.QueryRow(`SELECT ref FROM workflow_candidates WHERE project=? AND cycle=? AND ticket=?`, s.project, cycle, ticket).Scan(&ref)
+	return ref, err
+}
+
+// ArtifactIDs returns immutable published inputs under a candidate directory.
+func (s *Store) ArtifactIDs(cycle int, prefix string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT ref_id,path FROM workflow_artifacts WHERE project=? AND cycle=? AND state='published' ORDER BY ref_id`, s.project, cycle)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id, path string
+		if err = rows.Scan(&id, &path); err != nil {
+			return nil, err
+		}
+		if strings.HasPrefix(path, prefix) {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
 }

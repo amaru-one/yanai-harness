@@ -289,14 +289,47 @@ Location: harness role registry, prompts, context assembly, and provider adapter
 
 Location: harness approval, preflight, and accounting. Owners: Engineer; human approves plans.
 
-- [ ] Present a concrete reviewable plan: evidence or technical-enabler rationale, ticket graph, allowed paths, expected changes, required tests, dependencies, and execution limits.
-- [ ] Bind approval to canonical ticket data, scope and contract revisions, repository identity, base commit/content, and execution policy. Changing mutable state outside the approved contract must not authorize different work.
-- [ ] Track the engine's own successive patch states so an authorized change does not invalidate itself. Stop on unexpected external edits, changed acceptance criteria, or changes outside the approved scope.
-- [ ] Define configurable token/cost, elapsed-time, model-call, and repair limits. Reserve budget before calls and persist attempts/usage, including retries and failed or truncated responses. Treat unknown cost as unknown, never zero.
-- [ ] Allow bounded fixes within approved scope without repeated permission requests. Require revised approval for expanded scope or contract changes; keep commit, merge, deployment, and destructive database actions under their explicit project authorization policy.
-- [ ] Test edited task data, changed source without a new commit, tampered inputs, invalid repository identity, exhausted budget, and an unauthorized attempt to set `verified`.
+- [x] Present a concrete reviewable plan: evidence or technical-enabler rationale, ticket graph, allowed paths, expected changes, required tests, dependencies, and execution limits.
+- [x] Bind approval to canonical ticket data, scope and contract revisions, repository identity, base commit/content, and execution policy. Changing mutable state outside the approved contract must not authorize different work.
+- [x] Track the engine's own successive patch states so an authorized change does not invalidate itself. Stop on unexpected external edits, changed acceptance criteria, or changes outside the approved scope.
+- [x] Define configurable token/cost, elapsed-time, model-call, and repair limits. Reserve budget before calls and persist attempts/usage, including retries and failed or truncated responses. Treat unknown cost as unknown, never zero.
+- [x] Allow bounded fixes within approved scope without repeated permission requests. Require revised approval for expanded scope or contract changes; keep commit, merge, deployment, and destructive database actions under their explicit project authorization policy.
+- [x] Test edited task data, changed source without a new commit, tampered inputs, invalid repository identity, exhausted budget, and an unauthorized attempt to set `verified`.
 
-**Exit:** approval authorizes exactly the work the engine can execute, and limits stop further side effects deterministically.
+**Exit:** met locally on 2026-09-20. Approval now binds a versioned execution
+contract to canonical ticket rows, evidence/scope and provenance, prompt/model
+settings, required checks, policy, repository identity, index and content hashes.
+The approval record, active contract, conditional phase change and event commit
+in one SQLite transaction. `review` exposes the complete contract; `approve
+--contract HASH` can pin the exact reviewed revision. `policy --note` and
+`invalidate --note` explicitly revise authorization without clearing consumption.
+
+SQLite schema v3 records cycle-wide reservations, actual provider usage/cost,
+HTTP retries, billing reconciliation, bounded repair attempts and active work
+leases. Configuration requires finite explicit limits and model price bounds.
+Missing billing/usage blocks paid calls across the workspace; `reconcile-attempt`
+records confirmed figures and provenance. `--retry-unresolved` acknowledges risk
+but cannot erase spending or bypass billing reconciliation. Failed analysis resumes
+its existing cycle instead of opening a fresh budget. Human review time is excluded;
+abandoned active intervals are charged conservatively through their lease expiry.
+
+The engine records exact intended and confirmed patch successors. Temporary-repo
+CLI tests prove authorized successors preserve approval and subsequent external
+edits invalidate it. This is the accounting/authorization seam for Step 8, not a
+repository patch executor. Candidate responses and files now use immutable,
+store-bound publication; candidate readiness commits with its artifact reference.
+Inputs are hash-checked before reuse. `response_recorded`, `candidate_ready` and
+`awaiting_execution` remain the vocabulary; no actor can set `verified` yet.
+
+Validation: full harness `go test ./...`, `go test -race ./...`, `go vet ./...`,
+`go build ./...`, and `git diff --check`. Regression coverage includes stale and
+tampered contracts/inputs, changed source without a commit, wrong checkouts,
+concurrent reservations, unknown billing, retry/truncation accounting, restart and
+migration, exhausted limits, request deadlines, authorized patch successors and
+forbidden verification transitions. Step 6 remains deferred by explicit decision.
+VoiceNoteTranscribe testing, CI repair, UI work and real application patch execution
+were not included. Required project checks are approved data until Step 8 can run
+them through controlled tools.
 
 ### 8. Implement real changes in Yanai through controlled tools
 

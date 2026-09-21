@@ -30,6 +30,7 @@ func decisionSetup(t *testing.T, raw string, reply func(workflow.DecisionContext
 	if err := cmdInit([]string{"--ws", workspace}); err != nil {
 		t.Fatal(err)
 	}
+	configureExecution(t, workspace)
 	input := filepath.Join(workspace, "interviews", "private-source.md")
 	put(t, input, raw)
 	provider := &decisionProvider{}
@@ -66,7 +67,7 @@ func decisionSetup(t *testing.T, raw string, reply func(workflow.DecisionContext
 			provider.decisions++
 			content = reply(c, provider.decisions)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": content}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10, "cost": 0.001}, "choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": content}}}})
 	}))
 	t.Cleanup(server.Close)
 	name := filepath.Join(workspace, "yanai.config.json")
@@ -343,6 +344,7 @@ func TestLegacyCyclesAreInspectibleButNeedExplicitReintake(t *testing.T) {
 	if err := cmdInit([]string{"--ws", workspace}); err != nil {
 		t.Fatal(err)
 	}
+	configureExecution(t, workspace)
 	w, err := ws.Open(workspace)
 	if err != nil {
 		t.Fatal(err)

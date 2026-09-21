@@ -9,7 +9,7 @@ import (
 // storeSchemaVersion is the ladder this binary knows how to run. OpenStore
 // refuses a database stamped with a newer version: an old binary must never
 // guess at what a newer schema's columns mean.
-const storeSchemaVersion = 2
+const storeSchemaVersion = 3
 
 // migrations are applied in order, each in its own transaction, and never
 // rewritten once released — a later version only appends. Table DDL uses
@@ -139,6 +139,50 @@ CREATE TABLE IF NOT EXISTS workflow_commands (
 	`
 ALTER TABLE workflow_cycles ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE workflow_tickets ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0;
+`,
+	// v3: approval contracts, admission reservations, active work and patch states.
+	`
+ALTER TABLE workflow_cycles ADD COLUMN active_contract TEXT NOT NULL DEFAULT '';
+CREATE TABLE workflow_contracts (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, hash TEXT NOT NULL, payload TEXT NOT NULL,
+ PRIMARY KEY(project, cycle, hash)
+);
+CREATE TABLE workflow_budgets (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, policy TEXT NOT NULL,
+ tokens INTEGER NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0,
+ calls INTEGER NOT NULL DEFAULT 0, repairs INTEGER NOT NULL DEFAULT 0,
+ active_ms INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(project, cycle)
+);
+ALTER TABLE workflow_attempts ADD COLUMN cost_usd REAL;
+ALTER TABLE workflow_attempts ADD COLUMN reserved_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workflow_attempts ADD COLUMN reserved_cost REAL NOT NULL DEFAULT 0;
+ALTER TABLE workflow_attempts ADD COLUMN usage_known INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workflow_attempts ADD COLUMN model TEXT NOT NULL DEFAULT '';
+ALTER TABLE workflow_attempts ADD COLUMN provider_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE workflow_attempts ADD COLUMN finish_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE workflow_attempts ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0;
+-- Prior cost_known meant only that a response arrived, not that billing was known.
+UPDATE workflow_attempts SET cost_known = 0, reserved_tokens=total_tokens;
+CREATE TABLE workflow_sessions (
+ id TEXT PRIMARY KEY, project TEXT NOT NULL, cycle INTEGER NOT NULL,
+ started_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL, deadline_ms INTEGER NOT NULL,
+ closed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE workflow_repairs (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, ticket TEXT NOT NULL, attempts INTEGER NOT NULL,
+ PRIMARY KEY(project, cycle, ticket)
+);
+CREATE TABLE workflow_candidates (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, ticket TEXT NOT NULL, ref TEXT NOT NULL,
+ PRIMARY KEY(project,cycle,ticket)
+);
+CREATE TABLE workflow_patch_states (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, contract_hash TEXT NOT NULL,
+ current_hash TEXT NOT NULL, pre_hash TEXT NOT NULL DEFAULT '', post_hash TEXT NOT NULL DEFAULT '',
+ delta TEXT NOT NULL DEFAULT '', current_json TEXT NOT NULL, post_json TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 1,
+ PRIMARY KEY(project, cycle, contract_hash)
+);
 `,
 }
 

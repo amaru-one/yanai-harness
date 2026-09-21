@@ -90,8 +90,8 @@ type Approval struct {
 	ContractHash string    `json:"contract_hash"`
 }
 
-func ApprovalValid(a Approval, plan, scope, baseline string) bool {
-	return a.Actor != "" && a.PlanHash != "" && a.ScopeHash != "" && a.Baseline != "" &&
+func ApprovalValid(a Approval, plan, scope, baseline, contract string) bool {
+	return a.Actor == ActorHuman && contract != "" && a.ContractHash == contract && a.PlanHash != "" && a.ScopeHash != "" && a.Baseline != "" &&
 		a.PlanHash == plan && a.ScopeHash == scope && a.Baseline == baseline
 }
 

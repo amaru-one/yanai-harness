@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
 
   "project": "Yanai — aplicación docente",
 
@@ -20,6 +20,20 @@
     "title": "Yanai - agent team",
     "timeout_seconds": 600,
     "retries": 3
+  },
+
+  "execution": {
+    "max_tokens": 0,
+    "max_cost_usd": 0,
+    "max_active_seconds": 0,
+    "max_calls": 0,
+    "max_repairs": 0,
+    "prices": {},
+    "checks": [],
+    "commit": false,
+    "merge": false,
+    "deploy": false,
+    "destructive_db": false
   },
 
   "discussion_order": ["arquitecto-bd", "disenador", "ingeniero"],

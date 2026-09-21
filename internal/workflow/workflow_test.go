@@ -73,10 +73,10 @@ func TestReadyTicketsUsesDependencies(t *testing.T) {
 // in store_test.go, alongside the store.go/transitions.go/claims.go/
 // attempts.go it exercises. ApprovalValid is pure and stays here.
 func TestApprovalValid(t *testing.T) {
-	if !ApprovalValid(Approval{Actor: "human", PlanHash: "p", ScopeHash: "s", Baseline: "b"}, "p", "s", "b") {
+	if !ApprovalValid(Approval{Actor: "human", ContractHash: "c", PlanHash: "p", ScopeHash: "s", Baseline: "b"}, "p", "s", "b", "c") {
 		t.Fatal("valid approval rejected")
 	}
-	if ApprovalValid(Approval{Actor: "human", PlanHash: "p", ScopeHash: "s", Baseline: "b"}, "changed", "s", "b") {
+	if ApprovalValid(Approval{Actor: "human", ContractHash: "c", PlanHash: "p", ScopeHash: "s", Baseline: "b"}, "changed", "s", "b", "c") {
 		t.Fatal("changed plan remained approved")
 	}
 }

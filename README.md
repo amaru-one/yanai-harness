@@ -108,13 +108,16 @@ entre un equipo útil y uno que inventa:
 
 Actualiza `producto.md` al cerrar cada ciclo.
 
+Configura también los límites explícitos de `execution` antes de llamar modelos
+(ver «Aprobación y límites de Step 7»).
+
 ## Uso
 
 ```bash
 yanai analyze --privacy-reviewed interviews/docente-01.md    # abre el ciclo
 yanai discuss                              # mesa de trabajo + plan
-# lee cycles/001/04-plan.md con calma
-yanai approve                               # o: yanai reject --note "..."
+yanai review                                # contrato exacto, pruebas y presupuesto
+yanai approve --contract HASH               # HASH mostrado por review; o reject --note "..."
 yanai run                                   # solo corre si aprobaste
 yanai status                                # en qué va todo
 ```
@@ -239,7 +242,7 @@ archivos ignorados, rutas ocultas y archivos de credenciales reconocibles,
 incluido `.env`. El índice y las lecturas explícitas comparten esa política;
 pedir un archivo con `context --files` no evita los filtros.
 
-`run` exige un checkout limpio (también sin archivos no rastreados), y toma un
+`run` exige inicialmente un checkout limpio (también sin archivos no rastreados), y toma un
 bloqueo exclusivo en los metadatos Git durante toda la ejecución. Workspaces
 distintos y worktrees del mismo repositorio comparten el bloqueo. Al terminar
 el proceso se libera, incluso si murió; el archivo del bloqueo se conserva y
@@ -249,9 +252,11 @@ stash, reset ni limpieza de tus cambios.
 La planificación puede leer un checkout sucio, pero lo marca `DIRTY` y esa base
 no permite ejecutar. Tras resolver los cambios, vuelve a generar y aprobar el
 plan. La base incluye la identidad local del checkout, HEAD y su estado de
-limpieza: cambiar a otro clon con el mismo commit también invalida la base.
-Los planes anteriores a Step 3 deben regenerarse. El contrato completo de
-aprobación y el ejecutor de patches siguen pendientes en Steps 7 y 8.
+limpieza, contenido del backend y estado del índice: otro clon con el mismo
+commit también invalida la base. Step 7 registra sucesores exactos de los
+patches autorizados para que esos cambios no invaliden su propia aprobación.
+Cambios externos se rechazan, incluso entre dos estados ya sucios. La aplicación
+real de patches sigue pendiente en Step 8; `run` todavía publica candidatos.
 
 ## Cómo se actualiza un workspace existente
 
@@ -299,6 +304,63 @@ suposición. Un `init` normaliza a ruta canónica el destino ya configurado.
 - `agents.<rol>.temperature` — baja para el arquitecto y el ingeniero, más alta
   para el diseñador.
 - `discussion_order` — el orden importa: quien habla último responde a todos.
+
+
+### Aprobación y límites de Step 7
+
+Antes de llamar modelos, configura `execution` en `yanai.config.json`. La
+plantilla deja límites en cero y precios/pruebas vacíos deliberadamente: no hay
+un presupuesto monetario implícito. También el modo mock usa límites explícitos,
+pero sus llamadas registran costo y tokens cero.
+
+- `max_tokens`, `max_cost_usd`, `max_active_seconds`, `max_calls`: límites positivos
+  del ciclo completo, incluidos análisis, discusión, selección de archivos,
+  ejecución y reintentos HTTP. `max_repairs` admite cero para impedir correcciones.
+- `prices`: mapa por ID exacto de modelo, con `input_usd_per_million` y
+  `output_usd_per_million`. Configura cotas conservadoras para reservar antes de
+  cada petición; no se presentan como precios actuales del proveedor. Un precio
+  cero debe ser una decisión explícita. La factura real puede superar la estimación;
+  se registra y bloquea trabajo posterior, nunca se oculta.
+- `checks`: pruebas requeridas para todos los tickets, cada una con `id`, `args`
+  (lista, sin interpretar shell), `dir` relativo a Yanai y `timeout_seconds` positivo.
+  Por ejemplo, una prueba específica del backend usa `dir: "yanai-server"`.
+  Step 7 las muestra y vincula a la aprobación; Step 8 las ejecutará con herramientas
+  controladas. No incluyas VoiceNoteTranscribe ni reparación de CI en este trabajo.
+- `commit`, `merge`, `deploy`, `destructive_db`: permanecen en `false`. Este ejecutor
+  aún no admite habilitarlos; una aprobación de tareas no otorga esos permisos.
+
+`yanai review` muestra el contrato y los contadores durables. `yanai approve
+--contract HASH` fija la aprobación a ese contrato; si omites el argumento, el
+comando muestra y vincula el contrato actual. Tickets, criterios, alcance,
+instrucciones, configuración, discusión o contenido alterados bloquean `run`.
+Las proyecciones JSON y Markdown nunca otorgan autorización.
+
+`yanai policy` muestra consumo y reservas. Para adoptar una configuración de
+límites revisada, usa `yanai policy --note "motivo"`: conserva el gasto e invalida
+la aprobación de ejecución. Revisa y aprueba otra vez. Para cambiar el plan usa
+`yanai invalidate --note "motivo"`, luego `discuss`, `review` y `approve`. Ni los
+reintentos ni el reinicio del proceso reinician el presupuesto de ese ciclo.
+
+Si faltan costo o uso, **se detienen nuevas llamadas pagadas en el workspace**.
+Inspecciona `yanai status --attempts` y registra datos confirmados:
+
+```bash
+yanai reconcile-attempt --id ATTEMPT_ID --cost-usd 0.12 --tokens 450 --reference "referencia de facturación"
+```
+
+Ese monto es solo un ejemplo. Cero se acepta únicamente si lo confirmas
+explícitamente. Un envío incierto también requiere `--retry-unresolved` en
+`run` o `discuss`; reconocer el riesgo no sustituye la conciliación de facturación.
+Los intervalos activos incluyen esperas de reintento, pero excluyen revisión humana.
+Si un proceso muere, la recuperación carga conservadoramente hasta el vencimiento
+de su última concesión de tiempo (renovada cada 5 segundos, hasta 30 segundos).
+
+La migración SQLite a v3 conserva historial y trata costos históricos ausentes
+como desconocidos. Aprobaciones antiguas requieren invalidación, revisión y nueva
+aprobación; los ciclos importados siguen siendo históricos y no verificables.
+Los candidatos usan rutas inmutables por contenido y referencias en SQLite;
+antes de reutilizarlos se verifican sus hashes. Los estados siguen siendo
+`response_recorded`, `candidate_ready` y `awaiting_execution`.
 
 Variables de entorno:
 

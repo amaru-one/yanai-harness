@@ -36,6 +36,9 @@ func (s ArtifactStore) Publish(store *Store, cycle int, ref ArtifactRef, content
 	existing, err := store.GetArtifact(cycle, ref.ID)
 	switch {
 	case err == nil:
+		if existing.Path != path || existing.Version != ref.Version || existing.SHA256 != actual {
+			return ArtifactRef{}, fmt.Errorf("artifact %s identity/content differs from the stored reservation", ref.ID)
+		}
 		switch existing.State {
 		case "published":
 			if existing.SHA256 != actual {
