@@ -529,6 +529,34 @@ func contentHash(s string) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
+// sameTaskProjection compares a persisted task list against the projection its
+// plan would produce now. It exists instead of a bare reflect.DeepEqual because
+// "no dependencies" does not round-trip symmetrically: workflow.Ticket.DependsOn
+// carries omitempty, so an empty list is dropped on write and read back as nil,
+// while ws.Task.DependsOn has no omitempty and is read back as an empty slice.
+// A model that emits "depends_on": [] rather than omitting the key therefore
+// produced a projection that could never match itself, wedging every cycle whose
+// tickets have no dependencies. Both spellings mean the same thing, so they
+// compare equal here.
+func sameTaskProjection(actual, expected []ws.Task) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	for i := range actual {
+		a, e := actual[i], expected[i]
+		if len(a.DependsOn) == 0 {
+			a.DependsOn = nil
+		}
+		if len(e.DependsOn) == 0 {
+			e.DependsOn = nil
+		}
+		if !reflect.DeepEqual(a, e) {
+			return false
+		}
+	}
+	return true
+}
+
 // validateCurrentPlan makes structured data authoritative; Markdown/tasks are
 // projections, not an alternative way to authorize executable instructions.
 func (r *Runner) validateCurrentPlan(st *ws.State) error {
@@ -566,7 +594,7 @@ func (r *Runner) validateCurrentPlan(st *ws.State) error {
 		actual[i].Status = "pending"
 		actual[i].Deliverable = ""
 	}
-	if !reflect.DeepEqual(actual, expected) {
+	if !sameTaskProjection(actual, expected) {
 		return fmt.Errorf("task projection changed; discuss again")
 	}
 	if st.ScopeHash != contentHash(r.Workspace.ReadContext()) {
