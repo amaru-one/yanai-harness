@@ -1,7 +1,4 @@
 /yanai
-yanai-workspace/cycles/
-yanai-workspace/workflow.db
-yanai-workspace/workflow.db-*
-yanai-workspace/workflow.lock
+yanai-workspace/
 .env
 .DS_Store
