@@ -238,8 +238,6 @@ func mockResponse(model string, msgs []Message) string {
 	switch {
 	case strings.HasPrefix(last, "TICKET_PLAN_JSON"):
 		return mockTicketPlan(last)
-	case strings.Contains(last, "DECISION_JSON"):
-		return mockDecision(last)
 	case strings.Contains(last, "SELECCIONA_ARCHIVOS"):
 		b.WriteString("NECESITO: -\n")
 	case strings.Contains(last, "TAREA_DE_EJECUCION"):
@@ -275,43 +273,6 @@ func mockCandidate(message string) string {
 		c.Files = append(c.Files, workflow.CandidateFile{Path: path, Operation: workflow.CandidateSource, Source: &source})
 	}
 	out, _ := json.Marshal(c)
-	return string(out)
-}
-
-func mockDecision(message string) string {
-	const marker = "DECISION_CONTEXT_JSON\n"
-	_, rest, ok := strings.Cut(message, marker)
-	if !ok {
-		return "{}"
-	}
-	var c workflow.DecisionContext
-	if err := json.NewDecoder(strings.NewReader(rest)).Decode(&c); err != nil {
-		return "{}"
-	}
-	p := workflow.Proposal{SchemaVersion: "1", ID: "mock-decision", Origin: c.Source.Origin, Outcome: workflow.OutcomeProposeChange, Summary: "Propuesta simulada para probar el circuito, no evidencia de valor del producto.", Scope: []string{c.Scope.Requirements[0].ID}, Inputs: c.Inputs}
-	if c.Source.Origin == workflow.Product {
-		if len(c.Source.Excerpts) == 0 {
-			return "{}"
-		}
-		e := c.Source.Excerpts[0]
-		p.Citations = []workflow.Citation{{ID: "C-1", SourceID: c.Source.ID, Revision: c.Source.Revision, ExcerptID: e.ID, Quote: e.Text}}
-		p.Evidence = []string{"C-1"}
-		p.Findings = []workflow.Finding{{Kind: "inference", Text: "Esta fuente permite probar una propuesta simulada.", Evidence: p.Evidence}}
-	} else {
-		p.Rationale = "Comprobar la infraestructura del harness con una tarea técnica explícita."
-	}
-	// Each simulated ticket writes its own file: two tickets that declare the
-	// same output would produce a second patch with nothing left to change,
-	// which the executor rejects — correctly, and unhelpfully for a mock.
-	for i, owner := range []string{"arquitecto-bd", "disenador", "ingeniero"} {
-		output := fmt.Sprintf("yanai-server/ejemplo-%s.md", owner)
-		t := workflow.Ticket{SchemaVersion: "1", ID: fmt.Sprintf("T-%03d", i+1), Type: p.Origin, Title: "Tarea simulada", Description: "Validar la entrega de un candidato de backend.", Rationale: p.Rationale, Owner: owner, Status: "pending", Evidence: p.Evidence, Scope: p.Scope, Inputs: c.Inputs, Outputs: []string{output}, AllowedPaths: []string{"yanai-server"}, BaseCommit: c.BaseCommit, Criteria: []string{"El candidato respeta la ruta de backend."}, MaxAttempts: 2, Revision: 1}
-		if i > 0 {
-			t.DependsOn = []string{"T-001"}
-		}
-		p.Tickets = append(p.Tickets, t)
-	}
-	out, _ := json.Marshal(p)
 	return string(out)
 }
 

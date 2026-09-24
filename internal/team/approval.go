@@ -39,7 +39,7 @@ func (r *Runner) executionContract(st *ws.State) (workflow.ExecutionContract, er
 	}
 	if snapshot.Baseline() != st.BaselineHash {
 		if st.Approval == nil || st.Approval.ContractHash == "" {
-			return c, fmt.Errorf("approval is stale: repository baseline changed; invalidate and discuss again")
+			return c, fmt.Errorf("approval is stale: repository baseline changed; invalidate and plan again")
 		}
 		expected, _, err := r.Workspace.Store.PatchState(st.Cycle, st.Approval.ContractHash)
 		if err != nil || expected.Baseline() != snapshot.Baseline() {
@@ -73,22 +73,15 @@ func (r *Runner) executionContract(st *ws.State) (workflow.ExecutionContract, er
 		}
 		inputs["prompt:"+role] = workflow.Digest(string(b))
 	}
-	discussion := r.Workspace.ReadDocument(st.Cycle, "03-discusion.md")
-	if discussion == "" {
-		return c, fmt.Errorf("missing discussion input")
-	}
-	inputs["discussion"] = workflow.Digest(discussion)
 	if st.Markdown != nil {
 		inputs["source"] = st.Markdown.Revision
-		for _, ref := range st.Planning.Turns {
-			inputs[ref.ID] = ref.SHA256
+		if st.Planning != nil {
+			for _, ref := range st.Planning.Turns {
+				inputs[ref.ID] = ref.SHA256
+			}
 		}
 	} else {
-		inputs["source"] = st.Intake.Revision
-		inputs["source_provenance"], err = workflow.Hash(st.Intake)
-		if err != nil {
-			return c, err
-		}
+		return c, fmt.Errorf("cycle has no Markdown ticket source")
 	}
 	// Ticket rows, not the JSON projection, are canonical executable contracts.
 	for _, ticket := range st.Plan.Tickets {
@@ -109,7 +102,7 @@ func (r *Runner) executionContract(st *ws.State) (workflow.ExecutionContract, er
 		Repo     config.Repo
 		Provider config.OpenRouter
 		Order    []string
-	}{agents, r.Cfg.Repo, r.Cfg.OpenRouter, r.Cfg.DiscussionOrder})
+	}{agents, r.Cfg.Repo, r.Cfg.OpenRouter, r.Cfg.SpecialistOrder})
 	repo, _ := json.Marshal(snapshot)
 	// The approval binds the execution backend, the candidate wire format and
 	// the exact checkout, worktree and branch the diff will land in. All four
@@ -193,12 +186,6 @@ func (r *Runner) Approve(note, reviewedHash string) (*ws.State, error) {
 	if st.Phase != ws.PhaseWaiting {
 		return st, fmt.Errorf("only awaiting_approval plans can be approved")
 	}
-	artifact := workflow.ArtifactStore{Root: r.Workspace.Root}
-	discussion := r.Workspace.ReadDocument(st.Cycle, "03-discusion.md")
-	_, err = artifact.Publish(r.Workspace.Store, st.Cycle, workflow.ArtifactRef{ID: "discussion-" + hash, Path: fmt.Sprintf("cycles/%03d/inputs/%s/discussion.md", st.Cycle, hash), Version: hash}, []byte(discussion))
-	if err != nil {
-		return st, err
-	}
 	at := time.Now().UTC()
 	st.Approval = &ws.ApprovalBinding{Actor: workflow.ActorHuman, PlanHash: st.PlanHash, ScopeHash: st.ScopeHash, BaselineHash: st.BaselineHash, ContractHash: hash, ApprovedAt: at}
 	st.Phase = ws.PhaseApproved
@@ -247,10 +234,6 @@ func (r *Runner) checkApproval(st *ws.State) error {
 		return fmt.Errorf("approval is stale or incomplete; review and approve again")
 	}
 	if err = r.Workspace.Store.HasApproval(st.Cycle, hash); err != nil {
-		return err
-	}
-	_, err = (workflow.ArtifactStore{Root: r.Workspace.Root}).Read(r.Workspace.Store, st.Cycle, "discussion-"+hash)
-	if err != nil {
 		return err
 	}
 	if _, err = r.candidateContext(st); err != nil {

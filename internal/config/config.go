@@ -54,7 +54,7 @@ type Config struct {
 	Repo            Repo                     `json:"repo"`
 	OpenRouter      OpenRouter               `json:"openrouter"`
 	Agents          map[string]Agent         `json:"agents"`
-	DiscussionOrder []string                 `json:"discussion_order"`
+	SpecialistOrder []string                 `json:"specialist_order"`
 
 	path string
 }
@@ -63,7 +63,6 @@ type Config struct {
 // match the (unchanged, Spanish) prompt filenames and config keys they
 // map to, so they are intentionally not translated.
 const (
-	RolePO        = "product-owner"
 	RoleArchitect = "arquitecto-bd"
 	RoleEngineer  = "ingeniero"
 	RoleDesigner  = "disenador"
@@ -124,8 +123,8 @@ func (c *Config) applyDefaults() {
 	if c.Repo.MaxSelectedFiles == 0 {
 		c.Repo.MaxSelectedFiles = 15
 	}
-	if len(c.DiscussionOrder) == 0 {
-		c.DiscussionOrder = []string{RoleArchitect, RoleDesigner, RoleEngineer}
+	if len(c.SpecialistOrder) == 0 {
+		c.SpecialistOrder = []string{RoleArchitect, RoleDesigner, RoleEngineer}
 	}
 	for id, a := range c.Agents {
 		if a.ID == "" {

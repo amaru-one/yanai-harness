@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-const aPrompt = "prompts/product-owner.md"
+const aPrompt = "context/alcance.md"
 
 // extract runs Extract and indexes the outcome by path, which is how every
 // test below asks "what happened to this file?".

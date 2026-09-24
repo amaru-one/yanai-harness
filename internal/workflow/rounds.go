@@ -349,7 +349,7 @@ func (s *Store) finishRound(r ExecutionRound, expected, ticketVersion int64, sta
 		return &ErrStaleVersion{Kind: "round", Expected: expected}
 	}
 	res, err = tx.Exec(`UPDATE workflow_tickets SET status=?,state_version=state_version+1,updated_at=?
-		WHERE project=? AND cycle=? AND id=? AND revision=? AND state_version=? AND status=? AND legacy=0`,
+		WHERE project=? AND cycle=? AND id=? AND revision=? AND state_version=? AND status=?`,
 		status, now(), s.project, r.Cycle, r.Ticket, r.TicketRevision, ticketVersion, TicketCandidateReady)
 	if err != nil {
 		return err

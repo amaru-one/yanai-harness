@@ -1,7 +1,6 @@
 package workflow
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -63,26 +62,4 @@ func TestMarkdownInputAndObservationApproval(t *testing.T) {
 	if err != nil || state.Baseline() != base.Baseline() {
 		t.Fatal("supplemental approval changed patch state")
 	}
-	// Simulate a released v4 store with an intent that was never reconciled.
-	next := copyRepo(base)
-	next.Content["yanai-server/a.go"] = "changed"
-	next.Dirty = true
-	next.StatusHash = "changed"
-	if err = s.PreparePatch(1, contract, "T-1", next, 1); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.db.Exec(`DROP TABLE workflow_observations`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.db.Exec(`UPDATE workflow_meta SET value='4' WHERE key='schema_version'`); err != nil {
-		t.Fatal(err)
-	}
-	if err = applyMigrations(s.db); err == nil || !strings.Contains(err.Error(), "reconcile pending repository mutations") {
-		t.Fatalf("unsafe upgrade: %v", err)
-	}
-	var version string
-	if err = s.db.QueryRow(`SELECT value FROM workflow_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "4" {
-		t.Fatal(fmt.Sprint("failed upgrade changed schema: ", version, err))
-	}
-
 }

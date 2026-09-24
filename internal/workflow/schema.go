@@ -128,19 +128,7 @@ CREATE TABLE IF NOT EXISTS workflow_commands (
 	created_at  TEXT NOT NULL
 );
 `,
-	// v2: a `legacy` marker on cycles and tickets. yanai import --legacy
-	// writes rows directly at whatever phase/status the old state.json had —
-	// which can coincide with a real transition-table "from" value, e.g. an
-	// old cycle sitting at "approved". Without this column, a fresh 'yanai
-	// run' could pick such a cycle up and treat an unverified, imported
-	// record as newly authorized work. Every mutating store method checks
-	// it and refuses outright when set, regardless of what the transition
-	// table would otherwise allow.
-	`
-ALTER TABLE workflow_cycles ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE workflow_tickets ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0;
-`,
-	// v3: approval contracts, admission reservations, active work and patch states.
+	// v2: approval contracts, admission reservations, active work and patch states.
 	`
 ALTER TABLE workflow_cycles ADD COLUMN active_contract TEXT NOT NULL DEFAULT '';
 CREATE TABLE workflow_contracts (
@@ -233,17 +221,21 @@ func applyMigrations(db *sql.DB) error {
 			return fmt.Errorf("workflow_meta.schema_version is not a number: %q", raw)
 		}
 	}
-	if current > storeSchemaVersion {
-		return fmt.Errorf("workflow store is at schema version %d, newer than this binary's %d; upgrade yanai", current, storeSchemaVersion)
-	}
-	if current >= 3 && current < 5 {
-		var pending int
-		if err := db.QueryRow(`SELECT count(*) FROM workflow_patch_states WHERE post_hash<>''`).Scan(&pending); err != nil {
+	if current > 0 {
+		var epoch string
+		err := db.QueryRow(`SELECT value FROM workflow_meta WHERE key = 'workspace_epoch'`).Scan(&epoch)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("workspace format is unsupported; create a new workspace")
+		}
+		if err != nil {
 			return err
 		}
-		if pending > 0 {
-			return fmt.Errorf("reconcile pending repository mutations with the previous binary before upgrading this workspace")
+		if epoch != "ticket-flow-v1" {
+			return fmt.Errorf("workspace format %q is unsupported; create a new workspace", epoch)
 		}
+	}
+	if current > storeSchemaVersion {
+		return fmt.Errorf("workflow store is at schema version %d, newer than this binary's %d; upgrade yanai", current, storeSchemaVersion)
 	}
 	for v := current; v < len(migrations); v++ {
 		tx, err := db.Begin()
@@ -262,6 +254,9 @@ func applyMigrations(db *sql.DB) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_meta(key, value) VALUES ('workspace_epoch', 'ticket-flow-v1') ON CONFLICT(key) DO UPDATE SET value = excluded.value`); err != nil {
+		return err
 	}
 	return nil
 }

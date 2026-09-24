@@ -68,8 +68,6 @@ func TestParseTasks(t *testing.T) {
 
 func TestVerdict(t *testing.T) {
 	cases := map[string]string{
-		"bla\nVEREDICTO: NUEVO_PLAN\n":          "NUEVO_PLAN",
-		"bla\nveredicto: suficiente\n":          "SUFICIENTE",
 		"bla\nveredicto: needs_evidence\n":      "NEEDS_EVIDENCE",
 		"bla\nVEREDICTO: PROPOSE_CHANGE\n":      "PROPOSE_CHANGE",
 		"bla\nVEREDICTO: NO_CHANGE_NEEDED\n":    "NO_CHANGE_NEEDED",
@@ -85,13 +83,11 @@ func TestVerdict(t *testing.T) {
 	}
 }
 
-// A cycle closes without a plan on four distinct findings plus the legacy
-// SUFICIENTE. Only NO_CHANGE_NEEDED/SUFICIENTE claims the product is enough,
-// so the CLI and the flow must agree on the set — they read it from here.
+// A cycle closes without a plan on four distinct findings.
 func TestIsTerminalVerdict(t *testing.T) {
 	terminal := []string{
 		VerdictNoChangeNeeded, VerdictNeedsEvidence, VerdictOutOfScope,
-		VerdictBlockedByBaseline, VerdictLegacySufficient,
+		VerdictBlockedByBaseline,
 		"needs_evidence", // the parser upper-cases, but callers may not
 	}
 	for _, v := range terminal {
@@ -99,7 +95,7 @@ func TestIsTerminalVerdict(t *testing.T) {
 			t.Errorf("IsTerminalVerdict(%q) = false, expected true", v)
 		}
 	}
-	for _, v := range []string{VerdictProposeChange, VerdictLegacyNewPlan, "", "ALGO_INVENTADO"} {
+	for _, v := range []string{VerdictProposeChange, "", "ALGO_INVENTADO"} {
 		if IsTerminalVerdict(v) {
 			t.Errorf("IsTerminalVerdict(%q) = true, expected false", v)
 		}

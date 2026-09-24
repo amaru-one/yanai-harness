@@ -194,14 +194,6 @@ func TestResponseRejectedReturnsToPendingForARetry(t *testing.T) {
 	}
 }
 
-func TestLegacyUnverifiedTicketHasNoOutgoingEdge(t *testing.T) {
-	for _, to := range []string{TicketPending, TicketClaimed, TicketResponseRecorded, TicketCandidateReady, TicketResponseRejected} {
-		if actorAllowed(ticketTransitions, TicketLegacyUnverified, to, ActorEngine) {
-			t.Errorf("legacy_unverified -> %s should not be a transition", to)
-		}
-	}
-}
-
 func TestClaimExpiryReturnsTicketToPending(t *testing.T) {
 	s := openTestStore(t, "yanai")
 	s.CreateCycle(1, Product)
@@ -365,18 +357,18 @@ func TestRecordApprovalRequiresHashes(t *testing.T) {
 
 func TestCommandIdempotency(t *testing.T) {
 	s := openTestStore(t, "yanai")
-	key := "analyze/" + Digest("same input")
+	key := "plan/" + Digest("same input")
 	if _, found, err := s.CheckCommand(key); err != nil || found {
 		t.Fatalf("found=%v err=%v, want not found", found, err)
 	}
-	if err := s.RecordCommand(key, "analyze", "cycle-1"); err != nil {
+	if err := s.RecordCommand(key, "plan", "cycle-1"); err != nil {
 		t.Fatal(err)
 	}
 	result, found, err := s.CheckCommand(key)
 	if err != nil || !found || result != "cycle-1" {
 		t.Fatalf("result=%q found=%v err=%v", result, found, err)
 	}
-	if err := s.RecordCommand(key, "analyze", "cycle-2"); err == nil {
+	if err := s.RecordCommand(key, "plan", "cycle-2"); err == nil {
 		t.Fatal("a second recording of the same command key was accepted")
 	}
 }
@@ -426,7 +418,7 @@ func TestSaveTicketIsIdempotentButRejectsAConflictingReplay(t *testing.T) {
 	if _, err := s.SaveTicket(1, t1); err != nil {
 		t.Fatal(err)
 	}
-	// The exact same ticket again (a replayed discuss, or a crash-retry) is
+	// The exact same ticket again (a replay or a crash-retry) is
 	// a no-op, not a primary-key collision.
 	if _, err := s.SaveTicket(1, t1); err != nil {
 		t.Fatalf("idempotent replay: %v", err)
@@ -460,47 +452,5 @@ func TestListAndDeleteTickets(t *testing.T) {
 	// A revised plan can now reuse the same ticket IDs at revision 1.
 	if _, err := s.SaveTicket(1, ticket("T-1", "ingeniero")); err != nil {
 		t.Fatalf("reusing a ticket id after DeleteTickets: %v", err)
-	}
-}
-
-// TestImportedLegacyCycleCannotBeTransitionedEvenAtALiveLookingPhase is the
-// scenario the v2 migration exists for: an old cycle imported at a phase
-// that coincides with a real transition-table "from" value must not become
-// eligible for a live transition just because the string matches.
-func TestImportedLegacyCycleCannotBeTransitionedEvenAtALiveLookingPhase(t *testing.T) {
-	s := openTestStore(t, "yanai")
-	c, err := s.ImportLegacyCycle(1, PhaseApproved, "PROPOSE_CHANGE", Product, `{"legacy":true}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !c.Legacy || c.Phase != PhaseApproved {
-		t.Fatalf("imported cycle = %+v", c)
-	}
-	var legacyErr *ErrLegacyRecord
-	if _, err := s.ApplyCyclePhase(1, PhaseAwaitingExecution, ActorEngine, c.StateVersion, CycleFields{}, Event{}); !errors.As(err, &legacyErr) {
-		t.Fatalf("ApplyCyclePhase on a legacy cycle: %v, want *ErrLegacyRecord", err)
-	}
-	if _, err := s.SetCyclePayload(1, c.StateVersion, ActorEngine, CycleFields{Payload: "x"}, Event{}); !errors.As(err, &legacyErr) {
-		t.Fatalf("SetCyclePayload on a legacy cycle: %v, want *ErrLegacyRecord", err)
-	}
-}
-
-func TestImportedLegacyTicketIsAlwaysUnverifiedAndNeverPromotable(t *testing.T) {
-	s := openTestStore(t, "yanai")
-	s.ImportLegacyCycle(1, PhaseApproved, "PROPOSE_CHANGE", Product, "{}")
-	rec, err := s.ImportLegacyTicket(1, "T-1", "ingeniero", `{"status":"done"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !rec.Legacy || rec.Status != TicketLegacyUnverified {
-		t.Fatalf("imported ticket = %+v", rec)
-	}
-	for _, to := range []string{TicketPending, TicketClaimed, TicketCandidateReady} {
-		if _, err := s.ApplyTicketStatus(1, "T-1", to, ActorEngine, rec.StateVersion, Event{}); err == nil {
-			t.Fatalf("legacy ticket was promoted to %s", to)
-		}
-	}
-	if _, _, err := s.ClaimTicket(1, "T-1", "holder", time.Minute, Event{}); err == nil {
-		t.Fatal("a legacy ticket was claimed")
 	}
 }

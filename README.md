@@ -5,8 +5,7 @@ already-decided Markdown ticket; the engineer plans and implements it, consultin
 the DB architect and designer only when needed. Every observation pauses for a
 human response. Repository writes always require human approval.
 
-The Product Owner and interview intake are retired. Historical cycles remain
-readable. The engineer, DB architect, and designer's local Markdown prompts are
+The engineer, DB architect, and designer's local Markdown prompts are
 operator-owned and are never replaced during initialization or upgrade.
 
 ## Start a project
@@ -24,7 +23,7 @@ New workspaces require an explicit target. `--repo` is resolved from the invocat
 directory; configured relative paths are resolved from the workspace. `module_dir`
 is an optional Go-specific validation setting, relative to the Git root. `--allow .` explicitly permits safe files throughout
 the repository; narrower paths restrict context and generated writes. Git internals,
-secrets, symlink escapes, ignored files, and the legacy `yanai-ui` boundary remain
+secrets, symlink escapes, ignored files, and the `yanai-ui` boundary remain
 protected. Fingerprints cover safe repository files independently of narrowed
 context filters, plus the whole Git status and index.
 
@@ -96,7 +95,7 @@ prerequisite can run without PostgreSQL.
 
 Use [the small Markdown template](docs/ticket-template.md): one `# Title`, a
 `## Task` section, `## Acceptance criteria` containing `- ` bullets, and optional
-`## Constraints`. No interview metadata or privacy-review ceremony is required.
+`## Constraints`. No additional intake metadata or privacy-review ceremony is required.
 
 ```sh
 export OPENROUTER_API_KEY=...
@@ -133,10 +132,9 @@ must raise conflicts rather than rewrite those files.
 
 ## Compatibility and verification
 
-The active [work plan](docs/work-plan.md) replaces the
-[historical Yanai roadmap](docs/work-plan-legacy.md). The store upgrades additively;
-contract revision 3 rejects earlier approvals. Upgrade is refused if an older
-workspace has an unresolved mutation: reconcile it with the previous binary first.
+The [work plan](docs/work-plan.md) defines the current ticket workflow. A workspace
+must use the current store schema and contract revision; unsupported workspace
+formats are rejected.
 The target repository is not needed to inspect local status and recorded history.
 
 ```sh

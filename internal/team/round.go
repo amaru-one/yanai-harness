@@ -110,7 +110,6 @@ func (e *execution) generate(ctx context.Context, ticket workflow.Ticket, r work
 		Repository: state,
 		Scope:      e.scope,
 		Plan:       e.plan,
-		Discussion: e.discuss,
 	}
 	for _, dep := range ticket.DependsOn {
 		rec, err := e.store.GetTicket(e.st.Cycle, dep)
@@ -682,8 +681,6 @@ func executionMessage(in ExecutionInput) string {
 	b.WriteString(in.Scope)
 	b.WriteString("\n\n# Plan aprobado\n\n")
 	b.WriteString(in.Plan)
-	b.WriteString("\n\n# Discusión del equipo\n\n")
-	b.WriteString(in.Discussion)
 	fmt.Fprintf(&b, "\n\n"+workflow.TicketHeading+"%s\n\nTítulo: %s\nDescripción: %s\nCriterios de aceptación:\n", in.Ticket.ID, in.Ticket.Title, in.Ticket.Description)
 	for _, c := range in.Ticket.Criteria {
 		fmt.Fprintf(&b, "- %s\n", c)

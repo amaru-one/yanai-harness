@@ -138,7 +138,7 @@ func TestPublishRefusesConflictingReplay(t *testing.T) {
 // reconciliation must produce from a pending row, using the same store
 // primitives (PendingArtifacts, PublishArtifact, DropPendingArtifact) that
 // cmd/yanai's reconcileArtifacts composes: a file on disk with no matching
-// row is never adopted, matching the rule legacy import also follows.
+// row is never adopted, matching the rule for untrusted staged output.
 func TestArtifactReconciliationBranches(t *testing.T) {
 	s := openTestStore(t, "yanai")
 	root := t.TempDir()

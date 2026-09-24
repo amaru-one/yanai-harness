@@ -1,19 +1,14 @@
-// Package ws manages the on-disk workspace: prompts, context, interviews,
+// Package ws manages the on-disk workspace: prompts, context,
 // and each cycle's documents. Cycle *state* itself is authoritative in
 // internal/workflow's Store once a Workspace has one attached (Step 5);
 // cycles/NNN/state.json becomes a generated, labelled projection of that —
 // see writeProjection — kept only because it is a convenient, greppable
-// snapshot and because a cycle predating Step 5 has nothing else. A
-// Workspace opened with Store == nil (bare ws.Open) never touches the store
-// at all: every method below falls back to the plain file behavior this
-// package has always had, which is what lets a test construct a legacy,
-// pre-store cycle by hand.
+// snapshot. A Workspace opened with Store == nil (bare ws.Open) uses the
+// file projection for lightweight local operations and tests.
 package ws
 
 import (
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,21 +27,19 @@ import (
 // in ws_test.go pins that down, since SaveState's dispatch (below) depends on it.
 const (
 	PhaseEmpty             = "no_cycle"
-	PhaseAnalyzed          = "analyzed" // the PO produced insights and a proposal
-	PhaseSufficient        = "sufficient"
+	PhaseAnalyzed          = "analyzed" // the engineer produced a ticket plan
 	PhaseNoChange          = "no_change_needed"
 	PhaseNeedsEvidence     = "needs_evidence"
 	PhaseOutOfScope        = "out_of_scope"
 	PhaseBlockedBaseline   = "blocked_by_baseline"
-	PhaseDiscussed         = "discussed"
 	PhaseWaiting           = "awaiting_approval"
 	PhaseApproved          = "approved"
 	PhaseRejected          = "rejected"
-	PhaseAwaitingExecution = "awaiting_execution" // candidates staged under the pre-Step-8 flow
-	PhaseAwaitingReview    = "awaiting_review"    // applied and checked in yanai; Step 9 reviews it
+	PhaseAwaitingExecution = "awaiting_execution"
+	PhaseAwaitingReview    = "awaiting_review"
 )
 
-// Task is an assignment from the Product Owner to a team member. Status
+// Task is an assignment to a team member. Status
 // mirrors internal/workflow's ticket statuses (see transitions.go there) —
 // "pending", "claimed", "response_recorded", "candidate_ready" or
 // "response_rejected" — never "done": nothing here has been verified.
@@ -82,9 +75,6 @@ type State struct {
 	Markdown      *workflow.MarkdownTicket `json:"markdown_ticket,omitempty"`
 	Planning      *PlanningState           `json:"planning,omitempty"`
 	BaseCommit    string                   `json:"base_commit,omitempty"`
-	Intake        *workflow.Intake         `json:"intake,omitempty"`
-	Scope         *workflow.Scope          `json:"scope,omitempty"`
-	Proposal      *workflow.Proposal       `json:"proposal,omitempty"`
 	Plan          *workflow.Proposal       `json:"plan,omitempty"`
 	Cycle         int                      `json:"cycle"`
 	Phase         string                   `json:"phase"`
@@ -133,10 +123,9 @@ func (w *Workspace) path(p ...string) string {
 	return filepath.Join(append([]string{w.Root}, p...)...)
 }
 
-// Prompts, context and interviews.
+// Prompts and context.
 func (w *Workspace) PromptPath(rel string) string { return w.path(rel) }
 func (w *Workspace) ContextDir() string           { return w.path("context") }
-func (w *Workspace) InterviewsDir() string        { return w.path("interviews") }
 func (w *Workspace) CyclesDir() string            { return w.path("cycles") }
 
 // CycleDir returns cycles/NNN.
@@ -157,9 +146,15 @@ func (w *Workspace) LockWriter() (func(), error) {
 }
 
 // LastCycle returns the highest cycle number that has a directory under
-// cycles/, or 0 if there are none. This covers both store-backed and
-// legacy cycles uniformly, since both always get a cycle directory.
+// cycles/, or 0 if there are none.
 func (w *Workspace) LastCycle() int {
+	if w.Store != nil {
+		n, err := w.Store.MaxCycle()
+		if err != nil {
+			return 0
+		}
+		return n
+	}
 	entries, err := os.ReadDir(w.CyclesDir())
 	if err != nil {
 		return 0
@@ -178,43 +173,6 @@ func (w *Workspace) LastCycle() int {
 	}
 	sort.Ints(nums)
 	return nums[len(nums)-1]
-}
-
-// LegacyCycles returns the cycle numbers that have a directory (and a
-// state.json) but no row in the attached store: file-era cycles this
-// workspace has never imported. It is nil when Store is nil, since without
-// a store the question doesn't apply.
-func (w *Workspace) LegacyCycles() ([]int, error) {
-	if w.Store == nil {
-		return nil, nil
-	}
-	entries, err := os.ReadDir(w.CyclesDir())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var out []int
-	for _, d := range entries {
-		if !d.IsDir() {
-			continue
-		}
-		n, err := strconv.Atoi(d.Name())
-		if err != nil {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(w.CycleDir(n), "state.json")); err != nil {
-			continue
-		}
-		if _, err := w.Store.GetCycle(n); errors.Is(err, sql.ErrNoRows) {
-			out = append(out, n)
-		} else if err != nil {
-			return nil, err
-		}
-	}
-	sort.Ints(out)
-	return out, nil
 }
 
 // NewCycle reserves the next cycle number and its directory. With a store
@@ -272,20 +230,11 @@ func (w *Workspace) LoadState() (*State, error) {
 	return w.LoadCycleState(n)
 }
 
-// LoadCycleState reads the state of a specific cycle: from the store when
-// one is attached and holds a row for it, otherwise from state.json
-// directly — which is both the legacy path (a cycle that predates any store
-// ever being attached to this workspace) and the only path when Store is
-// nil.
+// LoadCycleState reads the state of a specific cycle from the store when one
+// is attached, or from the generated projection for lightweight operations.
 func (w *Workspace) LoadCycleState(n int) (*State, error) {
 	if w.Store != nil {
-		st, err := w.loadFromStore(n)
-		if err == nil {
-			return st, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
-		}
+		return w.loadFromStore(n)
 	}
 	b, err := os.ReadFile(filepath.Join(w.CycleDir(n), "state.json"))
 	if err != nil {
@@ -336,8 +285,7 @@ func (w *Workspace) loadFromStore(n int) (*State, error) {
 // transition table (internal/workflow/transitions.go) is what actually
 // enforces that only a human reaches "approved" or "rejected".
 //
-// Without a store, this is the original, unconditional file write — the
-// legacy path, and the only path when Store is nil.
+// Without a store, this writes the local projection directly.
 func (w *Workspace) SaveState(st *State, actor string) error {
 	st.Updated = time.Now()
 	if w.Store != nil {

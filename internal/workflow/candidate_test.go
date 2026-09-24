@@ -76,7 +76,7 @@ func TestDecodeCandidateRejectsEverythingTruncationLooksLike(t *testing.T) {
 		"no_change with files": `{"schema_version":"1","ticket":"T-1","result":"no_change","explanation":"x",
 			"files":[{"path":"yanai-server/a.go","operation":"unchanged"}]}`,
 		"unknown result":   `{"schema_version":"1","ticket":"T-1","result":"maybe","explanation":"x"}`,
-		"legacy fences":    "=== ARCHIVO: yanai-server/a.go ===\nx\n=== FIN ARCHIVO ===",
+		"fenced output":    "=== ARCHIVO: yanai-server/a.go ===\nx\n=== FIN ARCHIVO ===",
 		"two objects":      `{"schema_version":"1","ticket":"T-1","result":"no_change","explanation":"x"}{"a":1}`,
 		"invalid encoding": "{\"schema_version\":\"1\",\"ticket\":\"T-1\",\"result\":\"no_change\",\"explanation\":\"\xff\xfe\"}",
 		"unencodable source": `{"schema_version":"1","ticket":"T-1","result":"change","explanation":"x",

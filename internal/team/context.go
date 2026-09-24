@@ -78,7 +78,6 @@ type ExecutionInput struct {
 	Supporting   []Document               `json:"supporting"`
 	Scope        string                   `json:"scope"`
 	Plan         string                   `json:"plan"`
-	Discussion   string                   `json:"discussion"`
 	Repair       *Repair                  `json:"repair,omitempty"`
 	Observations []workflow.Observation   `json:"observations,omitempty"`
 }

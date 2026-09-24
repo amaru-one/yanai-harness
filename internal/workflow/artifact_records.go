@@ -15,7 +15,7 @@ type ArtifactRecord struct {
 	Path        string
 	SHA256      string
 	Version     string
-	State       string // "pending" | "published" | "legacy"
+	State       string // "pending" | "published"
 	CreatedAt   time.Time
 	PublishedAt time.Time
 }
@@ -136,7 +136,7 @@ func (s *Store) RecordCandidate(cycle int, ticket, ref string, expected int64) e
 	if published != "published" {
 		return errors.New("candidate artifact is not published")
 	}
-	res, err := tx.Exec(`UPDATE workflow_tickets SET status='candidate_ready',state_version=state_version+1 WHERE project=? AND cycle=? AND id=? AND state_version=? AND status='response_recorded' AND legacy=0`, s.project, cycle, ticket, expected)
+	res, err := tx.Exec(`UPDATE workflow_tickets SET status='candidate_ready',state_version=state_version+1 WHERE project=? AND cycle=? AND id=? AND state_version=? AND status='response_recorded'`, s.project, cycle, ticket, expected)
 	if err != nil {
 		return err
 	}

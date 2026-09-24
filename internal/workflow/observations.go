@@ -145,7 +145,7 @@ func (s *Store) ApproveObservations(cycle int, version int64, contract, reviewed
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE workflow_cycles SET state_version=state_version+1 WHERE project=? AND cycle=? AND state_version=? AND active_contract=? AND phase IN ('approved','awaiting_execution','awaiting_review') AND legacy=0`, s.project, cycle, version, contract)
+	result, err := tx.Exec(`UPDATE workflow_cycles SET state_version=state_version+1 WHERE project=? AND cycle=? AND state_version=? AND active_contract=? AND phase IN ('approved','awaiting_execution','awaiting_review')`, s.project, cycle, version, contract)
 	if err != nil {
 		return err
 	}

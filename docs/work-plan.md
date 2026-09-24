@@ -8,7 +8,7 @@ observation → review → human approval → native execution and checks → aw
 
 One Markdown ticket starts one cycle. The engineer leads and owns implementation.
 DB architect and designer are consulted only when the engineer records a reason.
-Product Owner and interviews are retired from the active CLI. Existing engineer,
+The active CLI starts directly from a ticket. Engineer,
 DB architect, and designer prompt files remain byte-for-byte unchanged, including
 through workspace initialization and upgrades. Orchestration instructions live in
 code; conflicts with local prompts must become observations.
@@ -34,12 +34,11 @@ verified exits, not merely code written. No PR is implied to have been published
 
 ### 1. Replace the roadmap
 
-- [x] Preserve the historical roadmap and its recorded limitations.
+- [x] Record the current scope and its known limitations.
 - [x] Document ticket intake, engineer leadership, selective consultation, prompt
   preservation, observation pauses, and human approval.
 
-Exit: active requirements no longer depend on teacher interviews or the deleted
-Yanai repository.
+Exit: active requirements no longer depend on a separate application repository.
 
 ### 2. Generalize repository binding and checks
 
@@ -61,7 +60,7 @@ module/toolchain. Language specifications stay in the existing local role prompt
   hashed immutable artifact and trace tasks to original acceptance criteria.
 - [x] Persist planning progress, model responses, observations, and human responses;
   resume without repeating recorded calls or bypassing unknown billing.
-- [x] Retire public `analyze` and `discuss`, preserving historical records.
+- [x] Remove the former multi-stage intake commands; new cycles start from Markdown tickets.
 
 Exit: valid tickets create durable cycles; malformed tickets make no model calls;
 observations survive restart and stop planning, approval, and execution.
@@ -91,14 +90,12 @@ replay without duplicate calls, and prompt integrity.
 Exit: an approved Markdown ticket creates the intended real project diff and
 validation evidence within its limits, ending at `awaiting_review`, not `verified`.
 
-## Unfinished legacy steps, adapted to the current app
+## Remaining roadmap steps
 
 These retain the original step numbers for traceability. Steps 7–8 supplied durable
-artifacts and native execution; the focused sequence above changes their intake
-and repository assumptions. Selective consultation does not complete Step 6;
-fixtures do not complete the real-provider pilots in Steps 10–11. The historical
-[roadmap](work-plan-legacy.md) records the former four-role/Yanai design and is not
-the active specification.
+artifacts and native execution; the focused sequence above defines the current
+intake and repository assumptions. Selective consultation does not complete Step 6;
+fixtures do not complete the real-provider pilots in Steps 10–11.
 
 ### Step 6. Bounded handoffs and model capability contracts
 
@@ -195,8 +192,8 @@ Implemented locally on 2026-09-23. No pull requests or commits were created.
   specialist pause, missing execution reapproval, library-build regression, wrong
   database result, unsafe upgrade, unreconciled billing, discarded response replay,
   lost observation recovery, and incorrect generated content in the real CLI check.
-- The historical roadmap and the three embedded role prompts were compared with
-  their original bytes. Local operator prompt files were not edited.
+- The three embedded role prompts were compared with their original bytes. Local
+  operator prompt files were not edited.
 
 Provider behavior was exercised with controlled responses, not paid OpenRouter
 calls. No model-quality result, cost-reduction percentage, arbitrary SQL migration
@@ -228,13 +225,12 @@ Validation performed on 2026-09-23:
 - Real Go root/nested-module and PostgreSQL temporary-table assertions passed.
   The three embedded role prompts still match their original bytes.
 - The internal and complete CLI package suites passed with `-race -shuffle=on`.
-  Vet and a CLI build passed. Combined runs exposed a legacy fixture flake:
-  a temporary path produced an all-numeric source digest that the old interview
-  redactor altered. The execution fixture now supplies a deterministic opaque
-  source ID; production interview behavior was not changed.
+  Vet and a CLI build passed. Combined runs exposed a fixture flake caused by a
+  temporary path producing an all-numeric source digest; the execution fixture
+  now supplies a deterministic opaque source ID.
 
 The allowlist trusts installed runtimes and project test code; it is not process
-isolation. Generic exit-code evidence proves only command success. Operator-chosen
-output rules determine whether skipped or zero-test suites are rejected. These
-fixtures do not complete legacy Steps 6, 9, 10, or 11 or demonstrate paid-model
+  isolation. Generic exit-code evidence proves only command success. Operator-chosen
+  output rules determine whether skipped or zero-test suites are rejected. These
+  fixtures do not complete Steps 6, 9, 10, or 11 or demonstrate paid-model
 quality, costs, or independent review.

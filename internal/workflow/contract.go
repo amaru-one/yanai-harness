@@ -125,7 +125,7 @@ func (s *Store) ApproveContract(a Approval, expected int64, payload string) erro
 	if _, err = tx.Exec(`UPDATE workflow_observations SET approved_contract=? WHERE project=? AND cycle=?`, a.ContractHash, s.project, a.Cycle); err != nil {
 		return err
 	}
-	res, err := tx.Exec(`UPDATE workflow_cycles SET phase='approved',active_contract=?,payload=?,state_version=state_version+1,updated_at=? WHERE project=? AND cycle=? AND phase='awaiting_approval' AND state_version=? AND legacy=0`, a.ContractHash, payload, now(), s.project, a.Cycle, expected)
+	res, err := tx.Exec(`UPDATE workflow_cycles SET phase='approved',active_contract=?,payload=?,state_version=state_version+1,updated_at=? WHERE project=? AND cycle=? AND phase='awaiting_approval' AND state_version=?`, a.ContractHash, payload, now(), s.project, a.Cycle, expected)
 	if err != nil {
 		return err
 	}
@@ -148,14 +148,13 @@ func (s *Store) ApproveContract(a Approval, expected int64, payload string) erro
 }
 func (s *Store) HasApproval(cycle int, hash string) error {
 	var phase, active string
-	var legacy int
-	if err := s.db.QueryRow(`SELECT phase,legacy,active_contract FROM workflow_cycles WHERE project=? AND cycle=?`, s.project, cycle).Scan(&phase, &legacy, &active); err != nil {
+	if err := s.db.QueryRow(`SELECT phase,active_contract FROM workflow_cycles WHERE project=? AND cycle=?`, s.project, cycle).Scan(&phase, &active); err != nil {
 		return err
 	}
 	// awaiting_review is still under this approval: the change is applied but
 	// nobody has reviewed or revoked it, so its evidence stays readable and a
 	// rerun stays idempotent. Only a human rejection ends it.
-	if active != hash || legacy != 0 || (phase != PhaseApproved && phase != PhaseAwaitingExecution && phase != PhaseAwaitingReview) {
+	if active != hash || (phase != PhaseApproved && phase != PhaseAwaitingExecution && phase != PhaseAwaitingReview) {
 		return errors.New("cycle has no active approval")
 	}
 	var blocked int

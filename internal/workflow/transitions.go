@@ -57,7 +57,6 @@ const (
 	TicketResponseRejected = "response_rejected"
 	TicketImplemented      = "implemented"
 	TicketNoChangeReported = "no_change_reported"
-	TicketLegacyUnverified = "legacy_unverified"
 )
 
 // SatisfiesDependency reports whether a ticket in this status has actually
@@ -85,12 +84,11 @@ func init() {
 			cycleTransitions[edge{from, t}] = actors
 		}
 	}
-	// Analyze's outcome: a fresh cycle either opens for discussion or closes
-	// on one of the four non-change findings.
+	// A fresh ticket plan either opens for approval or closes on one of the
+	// four non-change findings.
 	allow(PhaseNoCycle, append([]string{PhaseAnalyzed}, TerminalPhases...), ActorEngine)
-	// Discuss's outcome, from a first pass or after a human's rejection: the
-	// consolidated plan either awaits the human, or the team's second look
-	// still finds no proposable change.
+	// A completed plan, from a first pass or after a human's rejection, either
+	// awaits the human or records a non-change finding.
 	allow(PhaseAnalyzed, append([]string{PhaseAwaitingApproval}, TerminalPhases...), ActorEngine)
 	allow(PhaseRejected, append([]string{PhaseAwaitingApproval}, TerminalPhases...), ActorEngine)
 	// A paused/invalid ticket plan can be explicitly abandoned without changing
@@ -120,8 +118,6 @@ var ticketTransitions = map[edge][]string{
 	// recorded diff stays in the checkout; only the ticket's claim on being
 	// finished is withdrawn.
 	{TicketCandidateReady, TicketResponseRejected}: {ActorEngine},
-	// TicketLegacyUnverified has no outgoing edges at all: an imported
-	// file-era ticket can never be promoted by any transition.
 }
 
 func allowedActors(table map[edge][]string, from, to string) []string {
@@ -156,16 +152,4 @@ type ErrStaleVersion struct {
 
 func (e *ErrStaleVersion) Error() string {
 	return fmt.Sprintf("%s state changed since it was read (expected version %d); reload and retry", e.Kind, e.Expected)
-}
-
-// ErrLegacyRecord means the row was written by ImportLegacyCycle or
-// ImportLegacyTicket, not by a live transition, and no mutating method will
-// ever act on it — regardless of what its phase or status happens to say.
-type ErrLegacyRecord struct {
-	Kind string // "cycle" | "ticket"
-	ID   string
-}
-
-func (e *ErrLegacyRecord) Error() string {
-	return fmt.Sprintf("%s %s is an imported legacy record and cannot be transitioned", e.Kind, e.ID)
 }

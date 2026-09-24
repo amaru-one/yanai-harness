@@ -28,14 +28,11 @@ func (s *Store) EnsureBudget(cycle int, p ExecutionPolicy) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
-	c, err := s.GetCycle(cycle)
-	if err != nil {
+	if _, err := s.GetCycle(cycle); err != nil {
 		return err
 	}
-	if c.Legacy {
-		return &ErrLegacyRecord{Kind: "cycle", ID: fmt.Sprint(cycle)}
-	}
 	raw, _ := json.Marshal(p)
+	var err error
 	_, err = s.db.Exec(`INSERT INTO workflow_budgets(project,cycle,policy,tokens,cost,calls) SELECT ?,?,?,COALESCE(SUM(reserved_tokens),0),COALESCE(SUM(reserved_cost),0),COUNT(*) FROM workflow_attempts WHERE project=? AND cycle=? ON CONFLICT DO NOTHING`, s.project, cycle, string(raw), s.project, cycle)
 	if err != nil {
 		return err
@@ -82,13 +79,9 @@ func (s *Store) RevisePolicy(cycle int, p ExecutionPolicy, note string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var legacy int
 	var phase string
-	if err = tx.QueryRow(`SELECT legacy,phase FROM workflow_cycles WHERE project=? AND cycle=?`, s.project, cycle).Scan(&legacy, &phase); err != nil {
+	if err = tx.QueryRow(`SELECT phase FROM workflow_cycles WHERE project=? AND cycle=?`, s.project, cycle).Scan(&phase); err != nil {
 		return err
-	}
-	if legacy != 0 {
-		return errors.New("legacy cycle is read-only")
 	}
 	raw, _ := json.Marshal(p)
 	_, err = tx.Exec(`INSERT INTO workflow_budgets(project,cycle,policy,tokens,cost,calls) SELECT ?,?,?,COALESCE(SUM(reserved_tokens),0),COALESCE(SUM(reserved_cost),0),COUNT(*) FROM workflow_attempts WHERE project=? AND cycle=? ON CONFLICT(project,cycle) DO UPDATE SET policy=excluded.policy`, s.project, cycle, string(raw), s.project, cycle)

@@ -84,8 +84,7 @@ func Extract(dest string) (results []Result, fromVersion int, err error) {
 	return extractTemplates(dest, false)
 }
 
-// ExtractProject installs only active project templates. Historical templates
-// remain embedded for import/regression support, never installed by new init.
+// ExtractProject installs the active project templates.
 func ExtractProject(dest string) (results []Result, fromVersion int, err error) {
 	return extractTemplates(dest, true)
 }
@@ -110,7 +109,7 @@ func extractTemplates(dest string, project bool) (results []Result, fromVersion 
 		if rel == "." {
 			return nil
 		}
-		if project && (rel == "context" || rel == "prompts/product-owner.md") {
+		if project && rel == "context" {
 			if d.IsDir() {
 				return fs.SkipDir
 			}

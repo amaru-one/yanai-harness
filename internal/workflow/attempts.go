@@ -171,7 +171,7 @@ func (s *Store) ReconcileAttempts() ([]Attempt, error) {
 	return out, nil
 }
 
-// UnresolvedAttempts lists attempts left in the unknown state. run/discuss
+// UnresolvedAttempts lists attempts left in the unknown state. Planning and execution
 // check this and refuse — per the recorded decision, never retrying an
 // interrupted model call silently, since it may already have been billed.
 func (s *Store) UnresolvedAttempts() ([]Attempt, error) {

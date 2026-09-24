@@ -1,10 +1,7 @@
 package workflow
 
 import (
-	"database/sql"
 	"encoding/json"
-	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -192,47 +189,8 @@ func TestActiveTimeRecoveryChargesLeaseAndExcludesReview(t *testing.T) {
 		t.Fatal("normal close charged idle review time")
 	}
 }
-func TestMigrationDoesNotInventHistoricalBilling(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "v2.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(`CREATE TABLE workflow_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);INSERT INTO workflow_meta VALUES('schema_version','2')`); err != nil {
-		t.Fatal(err)
-	}
-	for _, migration := range migrations[:2] {
-		if _, err = db.Exec(migration); err != nil {
-			t.Fatal(err)
-		}
-	}
-	_, err = db.Exec(`INSERT INTO workflow_cycles(project,cycle,phase,created_at,updated_at) VALUES('yanai',1,'approved','x','x');INSERT INTO workflow_attempts(id,project,cycle,role,kind,request_hash,state,cost_known,total_tokens,started_at) VALUES('old','yanai',1,'ingeniero','role_turn','r','completed',1,42,'x')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	s, err := OpenStore(path, "yanai")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	if err = s.EnsureBudget(1, testPolicy()); err != nil {
-		t.Fatal(err)
-	}
-	a, err := s.GetAttempt("old")
-	if err != nil || a.CostKnown {
-		t.Fatalf("historical billing %+v %v", a, err)
-	}
-	b, _ := s.Budget(1)
-	if b.Calls != 1 || b.Tokens != 42 {
-		t.Fatalf("historical usage lost %+v", b)
-	}
-	if _, err = s.ReserveCall(reservation()); err == nil || !strings.Contains(err.Error(), "unreconciled") {
-		t.Fatal(err)
-	}
-}
 func TestBudgetPersistenceAcrossReopen(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := t.TempDir() + "/state.db"
 	s, err := OpenStore(path, "yanai")
 	if err != nil {
 		t.Fatal(err)

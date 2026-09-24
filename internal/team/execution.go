@@ -70,7 +70,6 @@ type execution struct {
 	ttl       time.Duration
 	plan      string
 	scope     string
-	discuss   string
 }
 
 // Execute applies the approved plan to the real application checkout.
@@ -155,9 +154,6 @@ func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved boo
 	if err = r.validateCurrentPlan(st); err != nil {
 		return st, err
 	}
-	if st.Intake != nil {
-		r.Redactions = st.Intake.Redactions
-	}
 	scopeHash := contentHash(r.Workspace.ReadContext())
 	if st.Markdown != nil {
 		scopeHash, _ = workflow.Hash(st.Markdown)
@@ -171,10 +167,6 @@ func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved boo
 		return st, err
 	}
 
-	discussion, err := (workflow.ArtifactStore{Root: r.Workspace.Root}).Read(store, st.Cycle, "discussion-"+st.Approval.ContractHash)
-	if err != nil {
-		return st, err
-	}
 	host, _ := os.Hostname()
 	e := &execution{
 		r: r, st: st, store: store, backend: backend, target: target,
@@ -184,7 +176,6 @@ func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved boo
 		ttl:       claimTTL(r.Cfg.OpenRouter.TimeoutSec),
 		plan:      r.Workspace.ReadDocument(st.Cycle, "04-plan.md"),
 		scope:     r.Workspace.ReadContext(),
-		discuss:   string(discussion),
 	}
 
 	if st.Markdown != nil {

@@ -1,5 +1,4 @@
-// yanai command: orchestrates a team of agents (Product Owner, DB Architect,
-// Engineer and Designer) over OpenRouter to develop the teaching app.
+// yanai command: orchestrates an engineer-led team over OpenRouter.
 //
 // Nothing gets implemented without a person's explicit approval.
 package main
@@ -11,7 +10,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -46,7 +44,6 @@ COMMANDS
   run [--task ID] [--retry-unresolved]                 Apply approved changes and checks
   policy [--note "..."]                               Inspect or adopt configured limits
   reconcile-attempt --id ID --cost-usd N --tokens N --reference ...
-  import --legacy                                    Import historical file-era cycles
   context [--files a,b]                               Inspect repository context
 
 Every command accepts --ws PATH (default: $YANAI_WS or ./yanai-workspace).
@@ -82,8 +79,6 @@ func run() error {
 		return nil
 	case "init":
 		return cmdInit(args)
-	case "analyze", "discuss":
-		return fmt.Errorf("interview intake is retired; use yanai plan <ticket.md>")
 	case "plan":
 		return cmdPlan(args)
 	case "resolve":
@@ -104,8 +99,6 @@ func run() error {
 		return cmdReject(args)
 	case "run":
 		return cmdRun(args)
-	case "import":
-		return cmdImport(args)
 	case "context":
 		return cmdContext(args)
 	default:
@@ -173,7 +166,7 @@ func cmdInit(args []string) error {
 			if e != nil {
 				return e
 			}
-			cleanup, e := attachStore(workspace, existingConfig, true)
+			cleanup, e := attachStore(workspace, existingConfig)
 			if e != nil {
 				return e
 			}
@@ -267,12 +260,10 @@ func printTemplateResults(results []templates.Result, fromVersion int) {
 // cycle state: it binds the application repository, attaches this
 // workspace's workflow store (creating it on first use), and returns a
 // cleanup func the caller must defer. Attaching the store also takes the
-// workspace writer lock for the returned Runner's lifetime, reconciles any
-// claim or attempt left behind by a process that died, and refuses outright
-// if file-era cycles exist that this workspace has never imported — see
-// attachStore. It also binds an OpenRouter client, so it requires an API key
+// workspace writer lock for the returned Runner's lifetime and reconciles any
+// claim or attempt left behind by a process that died. It also binds an OpenRouter client, so it requires an API key
 // (or YANAI_MOCK=1) even for a command that turns out not to call a model —
-// analyze, discuss and run all do. Approve and Reject never do, and use
+// plan and run may call the model. Approve and Reject never do, and use
 // bindWorkspace instead so the human gate doesn't need a key to operate.
 func openWorkspace(path string) (*team.Runner, func(), error) {
 	r, cleanup, err := bindWorkspace(path)
@@ -293,8 +284,7 @@ func openWorkspace(path string) (*team.Runner, func(), error) {
 
 // bindWorkspace does everything openWorkspace does except bind a model
 // provider: config, repository binding, and the workflow store (creating it
-// on first use, reconciling abandoned claims/attempts, refusing unimported
-// legacy cycles). Used directly by approve/reject, which never call a model
+// on first use and reconciling abandoned claims/attempts). Used directly by approve/reject, which never call a model
 // and so must not require an API key just to record a human decision.
 func bindWorkspace(path string) (*team.Runner, func(), error) {
 	cfg, err := config.Load(path)
@@ -305,7 +295,7 @@ func bindWorkspace(path string) (*team.Runner, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	cleanup, err := attachStore(w, cfg, false)
+	cleanup, err := attachStore(w, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -316,14 +306,12 @@ func bindWorkspace(path string) (*team.Runner, func(), error) {
 // workspace writer lock for the duration, and reconciles what a dead
 // process may have left behind: an expired ticket claim goes back to
 // pending, and an attempt still marked in_flight is stamped unknown — cost
-// unknown, never assumed zero — for run/discuss to refuse on
+// unknown, never assumed zero — for planning or execution to refuse on
 // (checkUnresolvedAttempts) until the operator explicitly acknowledges it.
 //
-// Unless allowLegacy, it also refuses when this workspace has file-era
-// cycles no one has run 'yanai import --legacy' on yet: letting most
-// commands quietly work around them is what would let an unverified
-// pre-Step-5 cycle drift back into the live flow unnoticed.
-func attachStore(w *ws.Workspace, cfg *config.Config, allowLegacy bool) (func(), error) {
+// A workspace is always opened against the current store schema and live
+// ticket workflow.
+func attachStore(w *ws.Workspace, cfg *config.Config) (func(), error) {
 	unlock, err := w.LockWriter()
 	if err != nil {
 		return nil, err
@@ -340,17 +328,6 @@ func attachStore(w *ws.Workspace, cfg *config.Config, allowLegacy bool) (func(),
 	w.Store = store
 	cleanup := func() { store.Close(); unlock() }
 
-	if !allowLegacy {
-		legacy, err := w.LegacyCycles()
-		if err != nil {
-			cleanup()
-			return nil, err
-		}
-		if len(legacy) > 0 {
-			cleanup()
-			return nil, fmt.Errorf("%d legacy, file-era cycle(s) predate this workspace's store and are not yet imported (%v); run: yanai import --legacy", len(legacy), legacy)
-		}
-	}
 	if _, err := store.ExpireClaims(); err != nil {
 		cleanup()
 		return nil, err
@@ -378,8 +355,7 @@ func attachStore(w *ws.Workspace, cfg *config.Config, allowLegacy bool) (func(),
 //	file absent                   -> drop the pending row (nothing to adopt)
 //	file present, hash mismatches -> report and leave pending; never adopt
 //
-// Never promoting an unverified file into looking authoritative mirrors the
-// same rule legacy import already follows.
+// Never promote an unverified file into looking authoritative.
 func reconcileArtifacts(store *workflow.Store, root string) error {
 	pending, err := store.PendingArtifacts()
 	if err != nil {
@@ -422,126 +398,8 @@ func withContext() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
-type redactionTerms []string
-
-func (r *redactionTerms) String() string { return "" }
-func (r *redactionTerms) Set(s string) error {
-	if strings.TrimSpace(s) == "" {
-		return fmt.Errorf("--redact requires a nonblank identifier")
-	}
-	*r = append(*r, s)
-	return nil
-}
-
-func cmdAnalyze(args []string) error {
-	fs := flag.NewFlagSet("analyze", flag.ExitOnError)
-	path := wsPath(fs)
-	sourceID := fs.String("source-id", "", "opaque source identifier; do not use a person's name")
-	date := fs.String("date", "", "interview date YYYY-MM-DD; omit if unknown")
-	reviewed := fs.Bool("privacy-reviewed", false, "source reviewed for personal/indirect identifiers")
-	technical := fs.Bool("technical-enabler", false, "input is an explicit engineering finding, not teacher demand")
-	var redactions redactionTerms
-	fs.Var(&redactions, "redact", "known personal identifier to remove; repeat as needed")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() == 0 {
-		return fmt.Errorf("missing the file with the interview notes\n  yanai analyze interviews/teacher-01.md\n  (use '-' to read from standard input)")
-	}
-
-	var text string
-	var err error
-	if fs.Arg(0) == "-" {
-		b, e := io.ReadAll(os.Stdin)
-		text, err = string(b), e
-	} else {
-		var b []byte
-		b, err = os.ReadFile(fs.Arg(0))
-		text = string(b)
-	}
-	if err != nil {
-		return err
-	}
-	origin := workflow.Product
-	if *technical {
-		origin = workflow.TechnicalEnabler
-	}
-	sourceName := fs.Arg(0)
-	if sourceName != "-" {
-		sourceName, err = filepath.Abs(sourceName)
-		if err != nil {
-			return err
-		}
-	}
-	intake, err := workflow.NewIntake(text, workflow.IntakeOptions{ID: *sourceID, Name: sourceName, Date: *date, Origin: origin, PrivacyReviewed: *reviewed, Redactions: redactions})
-	if err != nil {
-		return err
-	}
-
-	r, cleanup, err := openWorkspace(*path)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-	ctx, cancel := withContext()
-	defer cancel()
-
-	st, err := r.Analyze(ctx, text, intake)
-	if err != nil {
-		return err
-	}
-
-	dir := r.Workspace.CycleDir(st.Cycle)
-	fmt.Printf("\nCycle %03d — Product Owner verdict: %s\n", st.Cycle, st.Verdict)
-	if team.IsTerminalVerdict(st.Verdict) {
-		fmt.Printf("%s\n", verdictMeaning(st.Verdict))
-		fmt.Printf("Report: %s\n", filepath.Join(dir, "02-propuesta.md"))
-		return nil
-	}
-	fmt.Printf("Proposal: %s\n", filepath.Join(dir, "02-propuesta.md"))
-	fmt.Printf("\nNext step:  yanai discuss\n")
-	return nil
-}
-
-func cmdDiscuss(args []string) error {
-	fs := flag.NewFlagSet("discuss", flag.ExitOnError)
-	path := wsPath(fs)
-	retryUnresolved := fs.Bool("retry-unresolved", false, "acknowledge an interrupted prior model call (cost unknown) and proceed")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	r, cleanup, err := openWorkspace(*path)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-	ctx, cancel := withContext()
-	defer cancel()
-
-	st, err := r.Discuss(ctx, *retryUnresolved)
-	if err != nil {
-		return err
-	}
-	dir := r.Workspace.CycleDir(st.Cycle)
-	if team.IsTerminalVerdict(st.Verdict) {
-		fmt.Printf("Cycle %03d — %s\n%s\nReport: %s\n", st.Cycle, st.Verdict, verdictMeaning(st.Verdict), filepath.Join(dir, "04-plan.md"))
-		return nil
-	}
-	fmt.Printf("\nCycle %03d — plan consolidated with %d tasks.\n", st.Cycle, len(st.Tasks))
-	fmt.Printf("Discussion: %s\n", filepath.Join(dir, "03-discusion.md"))
-	fmt.Printf("Plan:       %s\n", filepath.Join(dir, "04-plan.md"))
-	printTasks(st)
-	fmt.Printf("\n⏸  STOPPED: nothing gets implemented without your approval.\n")
-	fmt.Printf("   Read the plan and then:\n     yanai approve\n     yanai reject --note \"why\"\n")
-	return nil
-}
-
-// cmdStatus is deliberately the one command that keeps working with no
-// store, no valid repo binding and no live provider: it's what an operator
-// reaches for exactly when something else is broken. It attaches the store
-// best-effort (allowLegacy: status is also how a legacy, un-imported cycle
-// gets inspected in the first place) and falls back to reading state.json
-// directly whenever that isn't possible.
+// cmdStatus remains useful when the provider or repository is unavailable.
+// It reads the current store when possible and falls back to its projection.
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	path := wsPath(fs)
@@ -555,7 +413,7 @@ func cmdStatus(args []string) error {
 		return err
 	}
 	if cfg, err := config.Load(*path); err == nil {
-		if cleanup, err := attachStore(w, cfg, true); err == nil {
+		if cleanup, err := attachStore(w, cfg); err == nil {
 			defer cleanup()
 		} else {
 			fmt.Fprintf(os.Stderr, "⚠  workflow store unavailable, showing file state only: %v\n", err)
@@ -591,9 +449,6 @@ func cmdStatus(args []string) error {
 	}
 	fmt.Printf("Cycle:   %03d\n", st.Cycle)
 	fmt.Printf("Phase:   %s\n", st.Phase)
-	if st.SchemaVersion != "1" {
-		fmt.Println("Legacy cycle: read-only. Re-import 00-entrada.md with analyze --privacy-reviewed; old deliverables remain unverified.")
-	}
 	if st.Verdict != "" {
 		fmt.Printf("Verdict: %s\n", st.Verdict)
 	}
@@ -653,16 +508,13 @@ func printUnresolvedAttempts(w *ws.Workspace) error {
 	return nil
 }
 
-// verdictMeaning renders a terminal verdict in the user's words. Each one is a
-// different finding: only NO_CHANGE_NEEDED/SUFICIENTE claims the product covers
-// the need. Reporting the others as sufficiency is what turned "we don't know"
-// into "nothing to do".
+// verdictMeaning renders a terminal finding in the user's words.
 func verdictMeaning(v string) string {
 	switch strings.ToUpper(v) {
-	case team.VerdictNoChangeNeeded, team.VerdictLegacySufficient:
+	case team.VerdictNoChangeNeeded:
 		return "the app covers what the interviewed teachers need."
 	case team.VerdictNeedsEvidence:
-		return "there isn't enough evidence to decide. This is not sufficiency: gather more interviews and reopen."
+		return "There is not enough evidence to decide. Submit a revised ticket with the missing evidence."
 	case team.VerdictOutOfScope:
 		return "what the teachers asked for falls outside the defined scope. The need stands; this project won't address it."
 	case team.VerdictBlockedByBaseline:
@@ -679,26 +531,23 @@ func suggestion(st *ws.State) string {
 
 	switch st.Phase {
 	case ws.PhaseAnalyzed:
-		return "Next step:  yanai discuss"
+		return "Resolve observations, then resume: yanai plan <ticket.md>"
 	case ws.PhaseNoChange:
 		return "No change needed: retain the positive evidence; reassess when new evidence arrives."
 	case ws.PhaseNeedsEvidence:
-		return "Collect answers to the recorded questions, then analyze the reviewed evidence in a new cycle."
+		return "Collect the requested evidence, then submit a revised ticket."
 	case ws.PhaseOutOfScope:
-		return "Request is outside scope. Defer it or have the human scope owner amend scope before a new analysis."
+		return "Request is outside scope. Submit a revised ticket if the scope changes."
 	case ws.PhaseBlockedBaseline:
-		return "Resolve the recorded baseline blocker, then analyze again."
-	case ws.PhaseSufficient:
-		return "Cycle closed without a plan — " + verdictMeaning(st.Verdict) +
-			"\nFor a new cycle, run 'yanai analyze' with other interviews."
+		return "Resolve the recorded baseline blocker, then submit the ticket again."
 	case ws.PhaseWaiting:
 		return "⏸  Awaiting your decision:  yanai approve   |   yanai reject --note \"...\""
 	case ws.PhaseRejected:
-		return "Plan rejected. To have the team redo it with your reason:  yanai discuss"
+		return "Plan rejected. Resume with a revised ticket: yanai plan <ticket.md>"
 	case ws.PhaseApproved:
 		return "Next step:  yanai run"
 	case ws.PhaseAwaitingExecution:
-		return "Candidates were staged by an older flow and were never applied or checked.\nRe-approve the current contract and run again: 'yanai review', 'yanai approve', 'yanai run'."
+		return "Execution is ready to resume: 'yanai review', 'yanai approve', 'yanai run'."
 	case ws.PhaseAwaitingReview:
 		return "The approved change is applied in the configured checkout and its checks passed.\nReview the uncommitted diff and recorded evidence. Independent technical review is not implemented."
 	default:
@@ -765,7 +614,7 @@ func cmdReject(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Cycle %03d REJECTED.\nThe team can redo the plan with your reason:  yanai discuss\n", st.Cycle)
+	fmt.Printf("Cycle %03d REJECTED.\nResume with a revised ticket: yanai plan <ticket.md>\n", st.Cycle)
 	return nil
 }
 
@@ -794,102 +643,6 @@ func cmdRun(args []string) error {
 		return err
 	}
 	fmt.Printf("\n%s\n", suggestion(st))
-	return nil
-}
-
-// cmdImport records file-era cycles into the workflow store as legacy and
-// unverified: never promotable (internal/workflow's transition table gives
-// TicketLegacyUnverified no outgoing edge, and the v2 legacy marker blocks a
-// cycle transition too), but present so 'status' and cycle history see the
-// project's whole past rather than only what started after Step 5.
-func cmdImport(args []string) error {
-	fs := flag.NewFlagSet("import", flag.ExitOnError)
-	path := wsPath(fs)
-	legacy := fs.Bool("legacy", false, "import file-era cycles into the workflow store, read-only and unverified")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if !*legacy {
-		return fmt.Errorf("nothing to import without --legacy")
-	}
-	cfg, err := config.Load(*path)
-	if err != nil {
-		return err
-	}
-	w, err := ws.Open(*path)
-	if err != nil {
-		return err
-	}
-	cleanup, err := attachStore(w, cfg, true)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	cycles, err := w.LegacyCycles()
-	if err != nil {
-		return err
-	}
-	if len(cycles) == 0 {
-		fmt.Println("No file-era cycles to import.")
-		return nil
-	}
-	for _, n := range cycles {
-		if err := importLegacyCycle(w, n); err != nil {
-			return fmt.Errorf("cycle %03d: %w", n, err)
-		}
-	}
-	fmt.Println("\nImported cycles are read-only: their staged deliverables were never checked and cannot be promoted.")
-	return nil
-}
-
-func importLegacyCycle(w *ws.Workspace, n int) error {
-	st, err := w.LoadCycleState(n)
-	if err != nil {
-		return err
-	}
-	origin := workflow.Product
-	if st.Intake != nil && st.Intake.Origin != "" {
-		origin = st.Intake.Origin
-	}
-	payload, err := json.Marshal(st)
-	if err != nil {
-		return err
-	}
-	if _, err := w.Store.ImportLegacyCycle(n, st.Phase, st.Verdict, origin, string(payload)); err != nil {
-		return err
-	}
-	for _, t := range st.Tasks {
-		tp, err := json.Marshal(t)
-		if err != nil {
-			return err
-		}
-		if _, err := w.Store.ImportLegacyTicket(n, t.ID, t.Owner, string(tp)); err != nil {
-			return err
-		}
-	}
-	artifacts := 0
-	root := w.CycleDir(n)
-	_ = filepath.WalkDir(filepath.Join(root, "entregables"), func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		data, readErr := os.ReadFile(p)
-		if readErr != nil {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			return nil
-		}
-		sum := sha256.Sum256(data)
-		refID := filepath.ToSlash(rel)
-		if err := w.Store.ImportLegacyArtifact(n, refID, refID, hex.EncodeToString(sum[:])); err == nil {
-			artifacts++
-		}
-		return nil
-	})
-	fmt.Printf("Imported cycle %03d (phase=%s, %d ticket(s), %d deliverable(s)) as legacy/unverified.\n", n, st.Phase, len(st.Tasks), artifacts)
 	return nil
 }
 

@@ -11,7 +11,6 @@ import (
 
 	"github.com/yanai/yanai-harness/internal/config"
 	"github.com/yanai/yanai-harness/internal/repoctx"
-	"github.com/yanai/yanai-harness/internal/repository"
 	"github.com/yanai/yanai-harness/internal/ws"
 )
 
@@ -233,49 +232,8 @@ func sameTaskProjection(actual, expected []ws.Task) bool {
 // validateCurrentPlan makes structured data authoritative; Markdown/tasks are
 // projections, not an alternative way to authorize executable instructions.
 func (r *Runner) validateCurrentPlan(st *ws.State) error {
-	if st.Markdown != nil {
-		return r.validateMarkdownPlan(st)
+	if st.Markdown == nil {
+		return fmt.Errorf("cycle has no current Markdown ticket plan")
 	}
-
-	if st.SchemaVersion != "1" || st.Plan == nil || st.Intake == nil || st.Scope == nil {
-		return fmt.Errorf("legacy cycle is read-only; re-import its input with analyze --privacy-reviewed")
-	}
-	if r.Cfg == nil {
-		cfg, err := config.Load(r.Workspace.Root)
-		if err != nil {
-			return err
-		}
-		r.Cfg = cfg
-	}
-	target, err := repository.Open(r.Cfg.Repo, r.Workspace.Root)
-	if err != nil {
-		return err
-	}
-	c, err := r.decisionContext(st)
-	if err != nil {
-		return err
-	}
-	if err := workflow.ValidateDecision(*st.Plan, c, r.roles(), target.CheckPath); err != nil {
-		return err
-	}
-	hash, err := workflow.Hash(st.Plan)
-	if err != nil {
-		return err
-	}
-	if st.PlanHash != hash || r.Workspace.ReadDocument(st.Cycle, "04-plan.md") != workflow.RenderProposal(*st.Plan) {
-		return fmt.Errorf("structured plan or review projection changed; discuss again")
-	}
-	expected := tasksForProposal(*st.Plan)
-	actual := append([]ws.Task(nil), st.Tasks...)
-	for i := range actual {
-		actual[i].Status = "pending"
-		actual[i].Deliverable = ""
-	}
-	if !sameTaskProjection(actual, expected) {
-		return fmt.Errorf("task projection changed; discuss again")
-	}
-	if st.ScopeHash != contentHash(r.Workspace.ReadContext()) {
-		return fmt.Errorf("project context changed; analyze again")
-	}
-	return nil
+	return r.validateMarkdownPlan(st)
 }

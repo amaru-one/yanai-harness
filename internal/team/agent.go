@@ -69,42 +69,31 @@ func (r *Runner) Run(ctx context.Context, role, message string) (string, error) 
 // wire-format contract with the (Spanish, untouched) prompt templates in
 // internal/templates/files/prompts, which instruct the LLM to emit exactly
 // these words. They are intentionally left untranslated.
-// The verdicts the Product Owner may emit, and the single place that defines
-// them. The prompt template, the inline analysis instructions in flow.go and
-// the CLI usage text all render from these lists, so the vocabulary cannot
-// drift between what the model is told and what the engine accepts.
-//
-// NUEVO_PLAN and SUFICIENTE are the original pair, kept so cycles and
-// workspaces created before the split still parse.
+// These are the plan outcomes accepted by the current ticket flow.
 const (
 	VerdictProposeChange     = "PROPOSE_CHANGE"
 	VerdictNoChangeNeeded    = "NO_CHANGE_NEEDED"
 	VerdictNeedsEvidence     = "NEEDS_EVIDENCE"
 	VerdictOutOfScope        = "OUT_OF_SCOPE"
 	VerdictBlockedByBaseline = "BLOCKED_BY_BASELINE"
-
-	VerdictLegacyNewPlan    = "NUEVO_PLAN"
-	VerdictLegacySufficient = "SUFICIENTE"
 )
 
-// ChangeVerdicts open a cycle for discussion; TerminalVerdicts close it
-// without one. Every verdict belongs to exactly one of the two.
+// ChangeVerdicts open a cycle for approval; TerminalVerdicts close it without one.
 var (
-	ChangeVerdicts = []string{VerdictProposeChange, VerdictLegacyNewPlan}
+	ChangeVerdicts = []string{VerdictProposeChange}
 
 	TerminalVerdicts = []string{
 		VerdictNoChangeNeeded,
 		VerdictNeedsEvidence,
 		VerdictOutOfScope,
 		VerdictBlockedByBaseline,
-		VerdictLegacySufficient,
 	}
 )
 
 var reVerdict = regexp.MustCompile(
 	`(?mi)^\s*VEREDICTO:\s*(` + strings.Join(append(append([]string{}, ChangeVerdicts...), TerminalVerdicts...), "|") + `)\s*$`)
 
-// Verdict extracts the Product Owner's decision from the analysis text.
+// Verdict extracts a plan outcome from agent text.
 func Verdict(text string) string {
 	m := reVerdict.FindStringSubmatch(text)
 	if m == nil {
@@ -220,7 +209,6 @@ func normalizeRole(v string) string {
 	v = strings.Trim(v, "`*_ ")
 	switch {
 	case strings.Contains(v, "product") || strings.Contains(v, "owner") || strings.Contains(v, "dueñ") || strings.Contains(v, "duen"):
-		return config.RolePO
 	case strings.Contains(v, "arquitect") || strings.Contains(v, "architect") || strings.Contains(v, "bd") || strings.Contains(v, "base de datos") || strings.Contains(v, "database") || strings.Contains(v, "db"):
 		return config.RoleArchitect
 	case strings.Contains(v, "diseñ") || strings.Contains(v, "disen") || strings.Contains(v, "design") || strings.Contains(v, "ux") || strings.Contains(v, "ui"):
