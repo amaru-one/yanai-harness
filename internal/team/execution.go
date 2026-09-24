@@ -130,16 +130,24 @@ func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved boo
 	if err = store.HasApproval(st.Cycle, st.Approval.ContractHash); err != nil {
 		return st, err
 	}
-
-	options, err := executor.Defaults(executor.Options{
-		Repo:      r.Cfg.Repo,
-		Store:     store,
-		Artifacts: workflow.ArtifactStore{Root: r.Workspace.Root},
-		Cycle:     st.Cycle,
-		Contract:  st.Approval.ContractHash,
-	})
+	checkInputs, err := r.approvedCheckInputs(st)
 	if err != nil {
 		return st, err
+	}
+	if issue := executor.Preflight(r.Cfg.Repo, r.Workspace.Root, contract.Policy, checkInputs); issue != nil {
+		return st, r.recordCheckBlocker(st, issue)
+	}
+
+	options, err := executor.Defaults(executor.Options{
+		Repo:        r.Cfg.Repo,
+		Store:       store,
+		Artifacts:   workflow.ArtifactStore{Root: r.Workspace.Root},
+		Cycle:       st.Cycle,
+		Contract:    st.Approval.ContractHash,
+		CheckInputs: checkInputs,
+	})
+	if err != nil {
+		return st, r.recordCheckBlocker(st, err)
 	}
 	backend, err := executor.Open(options)
 	if err != nil {
@@ -183,7 +191,10 @@ func (r *Runner) Execute(ctx context.Context, onlyID string, retryUnresolved boo
 		if e2 != nil {
 			return st, e2
 		}
-		e.scope = string(data)
+		e.scope, e2 = workflow.RedactCheckInputs(string(data))
+		if e2 != nil {
+			return st, e2
+		}
 	}
 
 	// One active session covers generation, application, checks and repairs:

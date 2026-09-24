@@ -384,7 +384,7 @@ func (e *execution) check(ctx context.Context, ticket workflow.Ticket, r workflo
 		if result.ID == "" {
 			// The check never started: a configuration or environment refusal,
 			// not a verdict about the code.
-			return r, version, fmt.Errorf("check %s could not run: %w", c.ID, runErr)
+			return r, version, e.r.recordCheckBlocker(e.st, fmt.Errorf("check %s could not run: %w", c.ID, runErr))
 		}
 		record := workflow.CheckRecord{
 			CheckID:  c.ID,
@@ -451,7 +451,7 @@ func verifyTestEvidence(c workflow.Check, result executor.CheckResult) string {
 	if len(c.Args) < 2 || c.Args[0] != "go" || c.Args[1] != "test" {
 		return ""
 	}
-	if c.RequiresPostgres && !result.DatabaseEnabled {
+	if c.PostgresURLVar != "" && !result.DatabaseEnabled {
 		return "test check ran without a disposable PostgreSQL URL; skipped database tests cannot prove acceptance"
 	}
 	packages, skips := 0, 0

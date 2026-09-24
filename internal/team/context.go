@@ -216,6 +216,7 @@ const candidateInstructions = `Responde EXACTAMENTE con un objeto JSON, sin cerc
 
 Reglas:
 - Si tienes CUALQUIER observación, incluso consultiva, responde result="observation", files=[], observations=[{"description":"...","requirement":"AC o tarea afectada","question":"pregunta al humano"}]. El ciclo se pausa hasta respuesta y nueva aprobación humana. No ocultes observaciones en explanation. Las respuestas humanas están en el contexto; no amplían el contrato aprobado.
+- Si el resultado anterior indica que falta una variable, herramienta o biblioteca del entorno, informa esa causa como observación concreta. No cambies código solo para esconder un fallo del entorno ni afirmes que la prueba pasó.
 - "files" lleva UNA entrada por cada salida declarada de la tarea, ni más ni menos, con la ruta exacta.
 - Cada entrada es {"path":"<ruta declarada>","operation":"source"|"delete"|"unchanged"} y, solo para "source", "source":"<contenido COMPLETO del archivo>" y opcionalmente "mode":"644"|"755".
 - "source" reemplaza el archivo entero: entrega el archivo completo, nunca un fragmento ni "el resto queda igual".

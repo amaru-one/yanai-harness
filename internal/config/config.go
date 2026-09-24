@@ -49,12 +49,11 @@ type OpenRouter struct {
 
 // Config is the full file.
 type Config struct {
-	Execution       workflow.ExecutionPolicy `json:"execution"`
-	Project         string                   `json:"project"`
-	Repo            Repo                     `json:"repo"`
-	OpenRouter      OpenRouter               `json:"openrouter"`
-	Agents          map[string]Agent         `json:"agents"`
-	SpecialistOrder []string                 `json:"specialist_order"`
+	Execution  workflow.ExecutionPolicy `json:"execution"`
+	Project    string                   `json:"project"`
+	Repo       Repo                     `json:"repo"`
+	OpenRouter OpenRouter               `json:"openrouter"`
+	Agents     map[string]Agent         `json:"agents"`
 
 	path string
 }
@@ -122,9 +121,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Repo.MaxSelectedFiles == 0 {
 		c.Repo.MaxSelectedFiles = 15
-	}
-	if len(c.SpecialistOrder) == 0 {
-		c.SpecialistOrder = []string{RoleArchitect, RoleDesigner, RoleEngineer}
 	}
 	for id, a := range c.Agents {
 		if a.ID == "" {

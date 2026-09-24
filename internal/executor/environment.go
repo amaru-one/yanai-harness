@@ -12,18 +12,12 @@ import (
 	"github.com/yanai/yanai-harness/internal/workflow"
 )
 
-// Environment variables an operator uses to point the executor at the Go
-// toolchain and the disposable database its checks require. They are operator
-// inputs, read once by the CLI; no model output ever reaches them.
+// Operator-owned Go toolchain settings are distinct from the human ticket's
+// project-specific check inputs. No caller environment is inherited by checks.
 const (
 	GoBinaryEnv    = "YANAI_GO_BINARY"
 	GoCacheEnv     = "YANAI_GO_CACHE"
 	ModuleCacheEnv = "YANAI_GO_MODCACHE"
-	// AdminURLEnv is retained for configured Go projects' database tests,
-	// so the harness supplies checks with exactly the variable those tests
-	// gate on. Without it the database tests skip, and a skipped database test
-	// can never count as acceptance — Check refuses to run at all.
-	AdminURLEnv = "YANAI_TEST_ADMIN_URL"
 )
 
 // Defaults resolves optional Go compatibility settings only when approved checks need Go,
@@ -45,12 +39,6 @@ func Defaults(o Options) (Options, error) {
 			needsGo = true
 		}
 	}
-	o.AdminURL = strings.TrimSpace(os.Getenv(AdminURLEnv))
-	if o.AdminURL != "" {
-		if err := localDatabase(o.AdminURL); err != nil {
-			return o, err
-		}
-	}
 	if !needsGo {
 		return o, nil
 	}
@@ -69,6 +57,23 @@ func Defaults(o Options) (Options, error) {
 		return o, err
 	}
 	return o, nil
+}
+
+func (n *Native) checkInputs(c workflow.Check) ([]string, error) {
+	var env []string
+	for _, name := range c.RequiredEnv {
+		value := n.o.CheckInputs[name]
+		if value == "" {
+			return nil, fmt.Errorf("check %s needs check input %s in the approved ticket", c.ID, name)
+		}
+		if name == c.PostgresURLVar {
+			if err := localDatabase(value); err != nil {
+				return nil, fmt.Errorf("check %s input %s: %w", c.ID, name, err)
+			}
+		}
+		env = append(env, name+"="+value)
+	}
+	return env, nil
 }
 
 func goEnv(binary, override, name string) (string, error) {
@@ -132,7 +137,7 @@ func (n *Native) resolveCheckTool(name string, tool workflow.CheckTool) (string,
 }
 func (n *Native) checkEnvironment(c workflow.Check, scratch string) ([]string, string, error) {
 	if c.Args[0] == "go" {
-		return n.goCheckEnvironment(scratch)
+		return n.goCheckEnvironment(c, scratch)
 	}
 	binary, err := n.resolveCheckTool(c.Args[0], n.contract.Policy.Tools[c.Args[0]])
 	if err != nil {
@@ -153,11 +158,10 @@ func (n *Native) checkEnvironment(c workflow.Check, scratch string) ([]string, s
 	sort.Strings(paths)
 	paths = append(paths, "/usr/bin", "/bin")
 	env := []string{"PATH=" + strings.Join(paths, string(os.PathListSeparator)), "HOME=" + scratch, "TMPDIR=" + scratch, "LANG=C", "TZ=UTC"}
-	if c.RequiresPostgres {
-		if err := localDatabase(n.o.AdminURL); err != nil {
-			return nil, "", err
-		}
-		env = append(env, "YANAI_TEST_ADMIN_URL="+n.o.AdminURL)
+	inputs, err := n.checkInputs(c)
+	if err != nil {
+		return nil, "", err
 	}
+	env = append(env, inputs...)
 	return env, binary, nil
 }

@@ -20,8 +20,49 @@ import (
 
 const markdownFixture = "# Document the package\n\n## Task\nAdd a short usage document at guide.md.\n\n## Acceptance criteria\n- guide.md describes how to call the package.\n\n## Constraints\nDo not change the API.\n"
 
+func TestMissingCheckInputPausesBeforeModelCall(t *testing.T) {
+	root := t.TempDir()
+	app := filepath.Join(root, "app")
+	workspace := filepath.Join(root, "workspace")
+	put(t, filepath.Join(app, "go.mod"), "module example.test/app\n\ngo 1.26.6\n")
+	put(t, filepath.Join(app, "app.go"), "package app\n")
+	git(t, app, "init", "-q")
+	git(t, app, "add", ".")
+	git(t, app, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "baseline")
+	if err := cmdInit([]string{"--ws", workspace, "--repo", app}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Execution = workflow.ExecutionPolicy{MaxTokens: 100, MaxCostUSD: 1, MaxActiveSeconds: 60, MaxCalls: 1, Prices: map[string]workflow.ModelPrice{}, Checks: []workflow.Check{{ID: "unit", Args: []string{"go", "build", "./..."}, Dir: ".", TimeoutSeconds: 30, RequiredEnv: []string{"PROJECT_CHECK_INPUT"}}}}
+	for _, a := range cfg.Agents {
+		cfg.Execution.Prices[a.Model] = workflow.ModelPrice{Input: 1, Output: 1}
+	}
+	data, _ := json.Marshal(cfg)
+	put(t, filepath.Join(workspace, "yanai.config.json"), string(data))
+	ticket := filepath.Join(root, "ticket.md")
+	put(t, ticket, markdownFixture)
+	t.Setenv("OPENROUTER_API_KEY", "test")
+	t.Setenv("YANAI_MOCK", "1")
+	if err := cmdPlan([]string{"--ws", workspace, ticket}); err == nil || !strings.Contains(err.Error(), "PROJECT_CHECK_INPUT") {
+		t.Fatalf("missing prerequisite was not reported: %v", err)
+	}
+	store := openWorkflowStore(t, workspace)
+	defer store.Close()
+	obs, err := store.Observations(1)
+	if err != nil || len(obs) != 1 || obs[0].Role != "engine" || !strings.Contains(obs[0].Detail.Description, "PROJECT_CHECK_INPUT") {
+		t.Fatalf("missing durable blocker: %+v %v", obs, err)
+	}
+	state := load(t, workspace)
+	if state.Planning == nil || len(state.Planning.Turns) != 0 {
+		t.Fatalf("model was called despite missing prerequisite: %+v", state.Planning)
+	}
+}
+
 func TestMarkdownCycleRoutingPauseAndExecution(t *testing.T) {
-	for _, scenario := range []string{"simple", "specialist_observation", "execution_observation", "crash_response", "unknown_billing", "real_checks", "python_checks"} {
+	for _, scenario := range []string{"simple", "specialist_observation", "execution_observation", "crash_response", "unknown_billing", "real_checks", "check_inputs", "python_checks"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			app := filepath.Join(root, "custom-app")
@@ -37,11 +78,16 @@ class Guide(unittest.TestCase):
 				put(t, filepath.Join(app, "go.mod"), "module example.test/custom\n\ngo 1.26.6\n")
 				put(t, filepath.Join(app, "library.go"), "package custom\nfunc Value() int { return 42 }\n")
 			}
-			if scenario == "real_checks" {
-				put(t, filepath.Join(app, "guide_test.go"), `package custom
+			if scenario == "real_checks" || scenario == "check_inputs" {
+				testSource := `package custom
 import("os";"strings";"testing")
-func TestGuide(t *testing.T){data,err:=os.ReadFile("guide.md");if err!=nil{t.Fatal(err)};if !strings.Contains(string(data),"Call Value() to obtain 42."){t.Fatal("guide does not describe the existing API")}}
-`)
+func TestGuide(t *testing.T){data,err:=os.ReadFile("guide.md");if err!=nil{t.Fatal(err)};if !strings.Contains(string(data),"Call Value() to obtain 42."){t.Fatal("guide does not describe the existing API")};if os.Getenv("OPENROUTER_API_KEY") != "" {t.Fatal("provider credential leaked")}}
+`
+				if scenario == "check_inputs" {
+					testSource += `func TestProjectInput(t *testing.T){if os.Getenv("PROJECT_CHECK_INPUT") != "expected-private-value" {t.Fatal("approved ticket input was not supplied")}}
+`
+				}
+				put(t, filepath.Join(app, "guide_test.go"), testSource)
 			}
 			git(t, app, "init", "-q")
 			git(t, app, "add", ".")
@@ -51,7 +97,7 @@ func TestGuide(t *testing.T){data,err:=os.ReadFile("guide.md");if err!=nil{t.Fat
 			}
 			if scenario == "python_checks" {
 				t.Setenv("YANAI_GO_BINARY", "/no-go-toolchain")
-			} else if scenario != "real_checks" {
+			} else if scenario != "real_checks" && scenario != "check_inputs" {
 				stubToolchain(t)
 			} else {
 				t.Setenv("YANAI_GO_BINARY", "")
@@ -77,6 +123,9 @@ func TestGuide(t *testing.T){data,err:=os.ReadFile("guide.md");if err!=nil{t.Fat
 					return
 				}
 				message := req.Messages[len(req.Messages)-1].Content
+				if scenario == "check_inputs" && strings.Contains(message, "expected-private-value") {
+					t.Error("check input leaked to model")
+				}
 				content := "NECESITO: -"
 				mu.Lock()
 				defer mu.Unlock()
@@ -140,6 +189,9 @@ func TestGuide(t *testing.T){data,err:=os.ReadFile("guide.md");if err!=nil{t.Fat
 			}
 			cfg.OpenRouter.BaseURL = server.URL
 			cfg.Execution = workflow.ExecutionPolicy{MaxTokens: 10000000, MaxCostUSD: 100, MaxActiveSeconds: 600, MaxCalls: 30, MaxRepairs: 5, Prices: map[string]workflow.ModelPrice{}, Checks: []workflow.Check{{ID: "unit", Args: []string{"go", "test", "-race", "-shuffle=on", "-count=1", "./..."}, Dir: ".", TimeoutSeconds: 60}}}
+			if scenario == "check_inputs" {
+				cfg.Execution.Checks[0].RequiredEnv = []string{"PROJECT_CHECK_INPUT"}
+			}
 			if scenario == "python_checks" {
 				binary, err := exec.LookPath("python3")
 				if err != nil {
@@ -167,7 +219,11 @@ func TestGuide(t *testing.T){data,err:=os.ReadFile("guide.md");if err!=nil{t.Fat
 			data, _ := json.Marshal(cfg)
 			put(t, filepath.Join(workspace, "yanai.config.json"), string(data))
 			ticketFile := filepath.Join(root, "ticket.md")
-			put(t, ticketFile, markdownFixture)
+			ticket := markdownFixture
+			if scenario == "check_inputs" {
+				ticket += "\n## Check inputs\n- PROJECT_CHECK_INPUT=expected-private-value\n"
+			}
+			put(t, ticketFile, ticket)
 			args := []string{"--ws", workspace, ticketFile}
 			if scenario == "unknown_billing" {
 				if e := cmdPlan(args); e == nil || !strings.Contains(e.Error(), "billing") {

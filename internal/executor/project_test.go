@@ -66,11 +66,19 @@ func TestNativeGenericProjectsWithRealChecks(t *testing.T) {
 				must(t, err)
 				return strings.TrimSpace(string(raw))
 			}
-			o := Options{Repo: config.Repo{Path: repo, ModuleDir: module, AllowedPaths: []string{"."}}, Store: store, Artifacts: workflow.ArtifactStore{Root: workspace}, Cycle: 1, GoCache: env("GOCACHE"), ModuleCache: env("GOMODCACHE"), AdminURL: admin}
+			inputs := map[string]string{}
+			if admin != "" {
+				inputs["YANAI_TEST_ADMIN_URL"] = admin
+			}
+			o := Options{Repo: config.Repo{Path: repo, ModuleDir: module, AllowedPaths: []string{"."}}, Store: store, Artifacts: workflow.ArtifactStore{Root: workspace}, Cycle: 1, GoCache: env("GOCACHE"), ModuleCache: env("GOMODCACHE"), CheckInputs: inputs}
 			checks := []workflow.Check{
-				{ID: "test", Args: []string{"go", "test", "-v", "-race", "-shuffle=on", "-count=1", "./..."}, Dir: module, TimeoutSeconds: 120, RequiresPostgres: kind == "postgres"},
+				{ID: "test", Args: []string{"go", "test", "-v", "-race", "-shuffle=on", "-count=1", "./..."}, Dir: module, TimeoutSeconds: 120},
 				{ID: "vet", Args: []string{"go", "vet", "./..."}, Dir: module, TimeoutSeconds: 120},
 				{ID: "build", Args: []string{"go", "build", "./..."}, Dir: module, TimeoutSeconds: 120},
+			}
+			if kind == "postgres" {
+				checks[0].RequiredEnv = []string{"YANAI_TEST_ADMIN_URL"}
+				checks[0].PostgresURLVar = "YANAI_TEST_ADMIN_URL"
 			}
 			approve(t, &o, checks, nil)
 			native, err := Open(o)
@@ -84,7 +92,7 @@ func TestNativeGenericProjectsWithRealChecks(t *testing.T) {
 				if result.ExitCode != 0 || result.Before != result.After || result.Evidence.SHA256 == "" {
 					t.Fatalf("invalid real evidence: %+v", result)
 				}
-				if check.RequiresPostgres && (!result.DatabaseEnabled || !strings.Contains(result.Output, "--- PASS: TestDatabase")) {
+				if check.PostgresURLVar != "" && (!result.DatabaseEnabled || !strings.Contains(result.Output, "--- PASS: TestDatabase")) {
 					t.Fatal("database test did not execute", result.Output)
 				}
 			}

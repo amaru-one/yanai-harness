@@ -48,8 +48,8 @@ COMMANDS
 
 Every command accepts --ws PATH (default: $YANAI_WS or ./yanai-workspace).
 OPENROUTER_API_KEY configures paid calls; YANAI_MOCK=1 uses synthetic responses.
-YANAI_TEST_ADMIN_URL supplies disposable loopback PostgreSQL for checks marked
-requires_postgres. YANAI_GO_BINARY, YANAI_GO_CACHE, YANAI_GO_MODCACHE override
+Check-specific inputs, including disposable loopback PostgreSQL URLs, come from
+the approved ticket's Check inputs section. YANAI_GO_BINARY, YANAI_GO_CACHE, YANAI_GO_MODCACHE override
 check toolchain/cache locations. Checks use approved tool allowlists; Go has built-in compatibility support.
 
 FLOW

@@ -114,7 +114,7 @@ func localDatabase(raw string) error {
 	}
 	return nil
 }
-func (n *Native) goCheckEnvironment(scratch string) ([]string, string, error) {
+func (n *Native) goCheckEnvironment(c workflow.Check, scratch string) ([]string, string, error) {
 	binary := n.o.GoBinary
 	if binary == "" {
 		var err error
@@ -150,12 +150,11 @@ func (n *Native) goCheckEnvironment(scratch string) ([]string, string, error) {
 		"GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off",
 		"GOVCS=*:off", "GOTELEMETRY=off", "CGO_ENABLED=1", "LANG=C", "TZ=UTC",
 	}
-	if n.o.AdminURL != "" {
-		if err := localDatabase(n.o.AdminURL); err != nil {
-			return nil, "", err
-		}
-		env = append(env, "YANAI_TEST_ADMIN_URL="+n.o.AdminURL)
+	inputs, err := n.checkInputs(c)
+	if err != nil {
+		return nil, "", err
 	}
+	env = append(env, inputs...)
 	return env, binary, nil
 }
 
@@ -184,8 +183,8 @@ func (n *Native) Check(ctx context.Context, id string) (CheckResult, error) {
 	if err = n.target.CheckDirectory(c.Dir); err != nil {
 		return CheckResult{}, err
 	}
-	if c.RequiresPostgres && n.o.AdminURL == "" {
-		return CheckResult{}, errors.New("test validation requires disposable PostgreSQL; skipped database tests cannot prove acceptance")
+	if _, err = n.checkInputs(*c); err != nil {
+		return CheckResult{}, err
 	}
 	scratch, err := os.MkdirTemp(n.o.Artifacts.Root, ".check-")
 	if err != nil {
@@ -204,7 +203,7 @@ func (n *Native) Check(ctx context.Context, id string) (CheckResult, error) {
 		}
 		args = append(args, c.Args[2:]...)
 	}
-	result := CheckResult{ID: "check-" + nonce(), CheckID: id, Contract: n.o.Contract, Binary: binary, Dir: filepath.Join(n.target.Root, c.Dir), Args: args, Before: before.Baseline(), ExitCode: -1, StartedAt: time.Now().UTC(), DatabaseEnabled: n.o.AdminURL != "" && (c.RequiresPostgres || c.Args[0] == "go")}
+	result := CheckResult{ID: "check-" + nonce(), CheckID: id, Contract: n.o.Contract, Binary: binary, Dir: filepath.Join(n.target.Root, c.Dir), Args: args, Before: before.Baseline(), ExitCode: -1, StartedAt: time.Now().UTC(), DatabaseEnabled: c.PostgresURLVar != ""}
 	// A start without a result is explicitly interrupted/unknown, never success.
 	if _, err = n.publish(result.ID+"-started", result); err != nil {
 		return result, err
@@ -240,9 +239,11 @@ func (n *Native) Check(ctx context.Context, id string) (CheckResult, error) {
 	result.FinishedAt = time.Now().UTC()
 	result.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
 	result.Truncated = output.truncated
-	result.Output = strings.ReplaceAll(string(output.data), n.o.AdminURL, "[disposable database URL]")
-	if n.o.AdminURL == "" {
-		result.Output = string(output.data)
+	result.Output = string(output.data)
+	for _, value := range n.o.CheckInputs {
+		if value != "" {
+			result.Output = strings.ReplaceAll(result.Output, value, "[check input]")
+		}
 	}
 	// A check is code execution. Detect unexpected repository writes; preserve
 	// them for inspection rather than deleting arbitrary subprocess output.

@@ -16,8 +16,10 @@ type MarkdownTicket struct {
 	Task        string        `json:"task"`
 	Criteria    []Requirement `json:"criteria"`
 	Constraints string        `json:"constraints,omitempty"`
-	Revision    string        `json:"revision"`
-	Source      ArtifactRef   `json:"source"`
+	// Names are visible to agents; values stay only in the approved source artifact.
+	CheckInputNames []string    `json:"check_input_names,omitempty"`
+	Revision        string      `json:"revision"`
+	Source          ArtifactRef `json:"source"`
 }
 
 func ParseMarkdownTicket(raw string) (MarkdownTicket, error) {
@@ -27,6 +29,7 @@ func ParseMarkdownTicket(raw string) (MarkdownTicket, error) {
 	}
 	section := ""
 	seen := map[string]bool{}
+	inputs := map[string]bool{}
 	var task, constraints []string
 	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
 		line = strings.TrimSpace(line)
@@ -40,7 +43,7 @@ func ParseMarkdownTicket(raw string) (MarkdownTicket, error) {
 		}
 		if strings.HasPrefix(line, "## ") {
 			section = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "## ")))
-			if section != "task" && section != "acceptance criteria" && section != "constraints" {
+			if section != "task" && section != "acceptance criteria" && section != "constraints" && section != "check inputs" {
 				return t, fmt.Errorf("unknown ticket section %q", section)
 			}
 			if seen[section] {
@@ -62,8 +65,16 @@ func ParseMarkdownTicket(raw string) (MarkdownTicket, error) {
 				return t, errors.New("acceptance criteria must be nonempty '- ' bullets")
 			}
 			t.Criteria = append(t.Criteria, Requirement{ID: fmt.Sprintf("AC-%03d", len(t.Criteria)+1), Text: strings.TrimSpace(line[2:])})
+		case "check inputs":
+			name, value, ok := strings.Cut(strings.TrimPrefix(line, "- "), "=")
+			name = strings.TrimSpace(name)
+			if !strings.HasPrefix(line, "- ") || !ok || !ValidCheckEnvName(name) || strings.TrimSpace(value) == "" || len(value) > 16<<10 || strings.ContainsRune(value, 0) || inputs[name] {
+				return t, errors.New("check inputs require unique '- NAME=value' lines with nonempty values")
+			}
+			inputs[name] = true
+			t.CheckInputNames = append(t.CheckInputNames, name)
 		default:
-			return t, errors.New("ticket content must be under Task, Acceptance criteria, or Constraints")
+			return t, errors.New("ticket content must be under Task, Acceptance criteria, Constraints, or Check inputs")
 		}
 	}
 	t.Task = strings.Join(task, "\n")
@@ -72,6 +83,51 @@ func ParseMarkdownTicket(raw string) (MarkdownTicket, error) {
 		return t, errors.New("ticket requires '# Title', '## Task', and '## Acceptance criteria' with bullets")
 	}
 	return t, nil
+}
+
+// ParseCheckInputs returns human-supplied values only to the check executor.
+// ParseMarkdownTicket deliberately exposes names alone to the model and review.
+func ParseCheckInputs(raw string) (map[string]string, error) {
+	if _, err := ParseMarkdownTicket(raw); err != nil {
+		return nil, err
+	}
+	inputs := map[string]string{}
+	section := ""
+	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "## ") {
+			section = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "## ")))
+			continue
+		}
+		if section != "check inputs" || !strings.HasPrefix(line, "- ") {
+			continue
+		}
+		name, value, _ := strings.Cut(strings.TrimPrefix(line, "- "), "=")
+		inputs[strings.TrimSpace(name)] = strings.TrimSpace(value)
+	}
+	return inputs, nil
+}
+
+// RedactCheckInputs keeps the human ticket readable in model context without
+// sending values that belong only to approved checks.
+func RedactCheckInputs(raw string) (string, error) {
+	if _, err := ParseMarkdownTicket(raw); err != nil {
+		return "", err
+	}
+	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
+	section := ""
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") {
+			section = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "## ")))
+			continue
+		}
+		if section == "check inputs" && strings.HasPrefix(trimmed, "- ") {
+			name, _, _ := strings.Cut(strings.TrimPrefix(trimmed, "- "), "=")
+			lines[i] = "- " + strings.TrimSpace(name) + "=[provided to approved checks]"
+		}
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 // DecodeStrict shares the duplicate-key and trailing-data defenses of candidates.

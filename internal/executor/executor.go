@@ -59,15 +59,17 @@ type Backend interface {
 
 // Options are trusted operator inputs, never model output. The evidence root
 // must be the workspace's durable artifact directory, outside the repository.
-// AdminURL is only for a disposable local PostgreSQL cluster. GoCache and
-// ModuleCache are prepopulated operator-owned caches; downloads are disabled.
+// CheckInputs are values from the approved human ticket, never model output.
+// GoCache and ModuleCache are prepopulated operator-owned caches; downloads
+// are disabled.
 type Options struct {
-	Repo                                     config.Repo
-	Store                                    *workflow.Store
-	Artifacts                                workflow.ArtifactStore
-	Cycle                                    int
-	Contract                                 string
-	GoBinary, GoCache, ModuleCache, AdminURL string
+	Repo                           config.Repo
+	Store                          *workflow.Store
+	Artifacts                      workflow.ArtifactStore
+	Cycle                          int
+	Contract                       string
+	GoBinary, GoCache, ModuleCache string
+	CheckInputs                    map[string]string
 }
 
 type Native struct {
@@ -133,6 +135,9 @@ func Open(o Options) (*Native, error) {
 	}
 	for _, check := range n.contract.Policy.Checks {
 		if err = validateCheck(check, n.contract.Policy.Tools); err != nil {
+			return nil, err
+		}
+		if _, err = n.checkInputs(check); err != nil {
 			return nil, err
 		}
 	}

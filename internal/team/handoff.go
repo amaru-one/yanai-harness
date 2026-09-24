@@ -124,6 +124,9 @@ func (e *execution) finalChecks(ctx context.Context, final workflow.RepositorySt
 		}
 		fmt.Fprintf(os.Stderr, "  final check %s…\n", c.ID)
 		result, runErr := e.backend.Check(ctx, c.ID)
+		if result.ID == "" {
+			return nil, e.r.recordCheckBlocker(e.st, fmt.Errorf("final check %s could not run: %w", c.ID, runErr))
+		}
 		record := workflow.CheckRecord{
 			CheckID: c.ID, RunID: result.ID, Evidence: result.Evidence,
 			ExitCode: result.ExitCode, Tested: result.Before,

@@ -1,4 +1,4 @@
-// Package repository binds the harness to the existing Yanai checkout.
+// Package repository binds the harness to an operator-selected Git checkout.
 // All paths are relative to its Git root, never to the harness workspace.
 package repository
 
@@ -27,11 +27,11 @@ type Target struct {
 // workspace may be empty for read-only operations without a workspace.
 func Open(r config.Repo, workspace string) (*Target, error) {
 	if strings.TrimSpace(r.Path) == "" {
-		return nil, fmt.Errorf("repo.path is empty; bind it with 'yanai init --repo /path/to/yanai'")
+		return nil, fmt.Errorf("repo.path is empty; bind it with 'yanai init --repo /path/to/project'")
 	}
 	root, err := Canonical(r.Path)
 	if err != nil {
-		return nil, fmt.Errorf("repo.path: %w (use 'yanai init --repo /path/to/yanai')", err)
+		return nil, fmt.Errorf("repo.path: %w (use 'yanai init --repo /path/to/project')", err)
 	}
 	t := &Target{Root: root, repo: r}
 	top, err := t.git("rev-parse", "--show-toplevel")
@@ -125,33 +125,6 @@ func moduleName(data []byte) string {
 		}
 	}
 	return ""
-}
-
-// DiscoverSibling recognizes the harness checkout from the invocation directory
-// (including its parent) or the binary location. Otherwise --repo is required.
-func DiscoverSibling(starts ...string) (string, error) {
-	for _, start := range starts {
-		abs, err := filepath.Abs(start)
-		if err != nil {
-			continue
-		}
-		for dir := abs; ; dir = filepath.Dir(dir) {
-			for _, harness := range []string{dir, filepath.Join(dir, "yanai-harness")} {
-				data, err := os.ReadFile(filepath.Join(harness, "go.mod"))
-				if err == nil && moduleName(data) == "github.com/yanai/yanai-harness" {
-					harness, err = Canonical(harness)
-					if err != nil {
-						return "", err
-					}
-					return filepath.Join(filepath.Dir(harness), "yanai"), nil
-				}
-			}
-			if filepath.Dir(dir) == dir {
-				break
-			}
-		}
-	}
-	return "", fmt.Errorf("cannot locate the harness's sibling Yanai checkout; pass --repo /path/to/yanai")
 }
 
 type Snapshot = workflow.RepositoryState
@@ -249,7 +222,7 @@ func (t *Target) CheckPath(path string) error {
 	}
 	for _, part := range strings.Split(path, "/") {
 		lower := strings.ToLower(part)
-		if strings.HasPrefix(part, ".") || lower == "yanai-ui" || lower == "secrets" || strings.Contains(lower, "credential") || strings.HasPrefix(lower, "secret") || strings.HasPrefix(lower, "id_rsa") || strings.HasPrefix(lower, "id_ed25519") {
+		if strings.HasPrefix(part, ".") || lower == "secrets" || strings.Contains(lower, "credential") || strings.HasPrefix(lower, "secret") || strings.HasPrefix(lower, "id_rsa") || strings.HasPrefix(lower, "id_ed25519") {
 			return fmt.Errorf("protected path: %q", path)
 		}
 		for _, excluded := range t.repo.ExcludeDirs {

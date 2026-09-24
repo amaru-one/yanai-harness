@@ -34,7 +34,7 @@ func selected(r config.Repo, path string) bool {
 }
 
 // Index uses the same boundary checks as explicit reads; symlink targets,
-// ignored files, secrets and the UI never enter the index or SPEC payloads.
+// ignored files, secrets and paths outside the configured boundary stay out.
 func Index(r config.Repo) (string, error) {
 	target, err := repository.Open(r, "")
 	if err != nil {
@@ -68,7 +68,7 @@ func Index(r config.Repo) (string, error) {
 					included = true
 				}
 			}
-			if !included || strings.HasPrefix(d.Name(), ".") || d.Name() == "yanai-ui" {
+			if !included || strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			for _, excluded := range r.ExcludeDirs {

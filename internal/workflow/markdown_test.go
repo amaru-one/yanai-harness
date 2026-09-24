@@ -1,9 +1,37 @@
 package workflow
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestCheckInputsStayOutOfAgentTicket(t *testing.T) {
+	const secret = "postgres://test:private@127.0.0.1:5432/postgres?sslmode=disable"
+	raw := "# Change\n\n## Task\nRun the database check.\n\n## Acceptance criteria\n- The database check runs.\n\n## Check inputs\n- MAWTA_TEST_ADMIN_URL=" + secret + "\n"
+	ticket, err := ParseMarkdownTicket(raw)
+	if err != nil || len(ticket.CheckInputNames) != 1 || ticket.CheckInputNames[0] != "MAWTA_TEST_ADMIN_URL" {
+		t.Fatalf("ticket names: %+v %v", ticket, err)
+	}
+	encoded, err := json.Marshal(ticket)
+	if err != nil || strings.Contains(string(encoded), secret) {
+		t.Fatalf("ticket leaked check input: %s %v", encoded, err)
+	}
+	inputs, err := ParseCheckInputs(raw)
+	if err != nil || inputs["MAWTA_TEST_ADMIN_URL"] != secret {
+		t.Fatalf("check inputs: %v %v", inputs, err)
+	}
+	redacted, err := RedactCheckInputs(raw)
+	if err != nil || strings.Contains(redacted, secret) || !strings.Contains(redacted, "MAWTA_TEST_ADMIN_URL=[provided to approved checks]") {
+		t.Fatalf("redaction: %s %v", redacted, err)
+	}
+	for _, line := range []string{"- PATH=/tmp", "- MAWTA_TEST_ADMIN_URL=", "- MAWTA_TEST_ADMIN_URL=second\n- MAWTA_TEST_ADMIN_URL=third"} {
+		bad := "# Change\n\n## Task\nRun.\n\n## Acceptance criteria\n- Run.\n\n## Check inputs\n" + line + "\n"
+		if _, err := ParseMarkdownTicket(bad); err == nil {
+			t.Fatalf("accepted unsafe check input %q", line)
+		}
+	}
+}
 
 func TestMarkdownInputAndObservationApproval(t *testing.T) {
 	good := "# Change\n\n## Task\nFix the parser.\n\n## Acceptance criteria\n- Reject invalid input.\n\n## Constraints\nKeep the API.\n"

@@ -23,6 +23,13 @@ func (r *Runner) executionContract(st *ws.State) (workflow.ExecutionContract, er
 	if r.Workspace.Store == nil {
 		return c, fmt.Errorf("approval requires SQLite authority")
 	}
+	checkInputs, err := r.approvedCheckInputs(st)
+	if err != nil {
+		return c, err
+	}
+	if err = r.preflightChecks(st, checkInputs); err != nil {
+		return c, err
+	}
 	if err := r.Workspace.Store.EnsureBudget(st.Cycle, r.Cfg.Execution); err != nil {
 		return c, err
 	}
@@ -101,8 +108,7 @@ func (r *Runner) executionContract(st *ws.State) (workflow.ExecutionContract, er
 		Agents   map[string]config.Agent
 		Repo     config.Repo
 		Provider config.OpenRouter
-		Order    []string
-	}{agents, r.Cfg.Repo, r.Cfg.OpenRouter, r.Cfg.SpecialistOrder})
+	}{agents, r.Cfg.Repo, r.Cfg.OpenRouter})
 	repo, _ := json.Marshal(snapshot)
 	// The approval binds the execution backend, the candidate wire format and
 	// the exact checkout, worktree and branch the diff will land in. All four

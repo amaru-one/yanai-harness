@@ -34,7 +34,6 @@ func TestConfiguredToolChecks(t *testing.T) {
 	}
 	t.Setenv("OPENROUTER_API_KEY", "must-not-inherit")
 	t.Setenv(GoBinaryEnv, "/nonexistent-go")
-	t.Setenv(AdminURLEnv, "")
 	o, n := fixture(t, checks, tools)
 	_, err = Defaults(o)
 	must(t, err)

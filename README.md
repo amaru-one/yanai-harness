@@ -23,8 +23,8 @@ New workspaces require an explicit target. `--repo` is resolved from the invocat
 directory; configured relative paths are resolved from the workspace. `module_dir`
 is an optional Go-specific validation setting, relative to the Git root. `--allow .` explicitly permits safe files throughout
 the repository; narrower paths restrict context and generated writes. Git internals,
-secrets, symlink escapes, ignored files, and the `yanai-ui` boundary remain
-protected. Fingerprints cover safe repository files independently of narrowed
+secrets, symlink escapes, and ignored files remain protected. The configured
+allowed paths enforce the project boundary. Fingerprints cover safe repository files independently of narrowed
 context filters, plus the whole Git status and index.
 
 Review `yanai.config.json`: the three model choices and prompt paths, allowed paths,
@@ -33,11 +33,11 @@ zero deliberately: configure them before paid calls. Existing custom configurati
 is preserved; rebinding does not silently widen an existing allowlist.
 
 A check has an ID, working directory relative to the Git root (`.` is valid),
-argument array, timeout, and optional PostgreSQL prerequisite. Existing Go checks
+argument array, timeout, and optional project-specific input names. Existing Go checks
 retain their built-in adapter:
 
 ```json
-{"id":"unit","dir":".","args":["go","test","-race","-shuffle=on","./..."],"timeout_seconds":120,"requires_postgres":false}
+{"id":"unit","dir":".","args":["go","test","-v","-race","-shuffle=on","./..."],"timeout_seconds":120,"required_env":["PROJECT_TEST_ADMIN_URL"],"postgres_url_var":"PROJECT_TEST_ADMIN_URL"}
 ```
 
 Other languages use explicitly configured, operator-installed executables in
@@ -72,8 +72,8 @@ reject zero-test or skipped suites when that matters. Output limits, timeouts,
 repository mutation detection, and durable evidence apply to every tool.
 
 Generic checks receive scratch HOME/TMPDIR, LANG, TZ, a PATH built from configured
-tool directories and system binary directories, and the database URL only when
-required. They do not inherit provider credentials. Provision dependencies first
+tool directories and system binary directories, and only their declared ticket
+inputs. They do not inherit provider credentials. Provision dependencies first
 and configure tools to keep generated caches outside the target. The optional Go
 adapter supports validated `go test`, `go vet`, and `go build` with external caches;
 `YANAI_GO_BINARY`, `YANAI_GO_CACHE`, and `YANAI_GO_MODCACHE` override its locations.
@@ -86,16 +86,22 @@ prompts. New configurations leave `repo.extensions` empty (no language filter);
 set explicit extensions to narrow context for a project. Repository protections
 and context byte limits still apply.
 
-For a check marked `requires_postgres`, set `YANAI_TEST_ADMIN_URL` to a disposable
-PostgreSQL URL with an explicit loopback host and port. Missing configuration
-blocks the check; skipped tests do not establish acceptance. Checks without this
-prerequisite can run without PostgreSQL.
+Declare `required_env` names for each check and supply their values in the
+ticket's optional `## Check inputs` section. `postgres_url_var`, when set, must
+name one of those inputs and is restricted to a disposable PostgreSQL URL with
+an explicit loopback host and port. The exact source ticket is bound to human
+approval; agents and displayed check evidence see names, never values. Missing
+inputs or tools block planning/review before approval, and are rechecked before
+execution. This static preflight does not prove a test suite can run; a runtime
+dependency failure remains a failed check requiring diagnosis. Skipped tests do
+not establish acceptance.
 
 ## Ticket cycle
 
 Use [the small Markdown template](docs/ticket-template.md): one `# Title`, a
 `## Task` section, `## Acceptance criteria` containing `- ` bullets, and optional
-`## Constraints`. No additional intake metadata or privacy-review ceremony is required.
+`## Constraints`, and optional `## Check inputs` with `- NAME=value` lines.
+Only names reach agents; keep the workspace and private ticket access restricted.
 
 ```sh
 export OPENROUTER_API_KEY=...

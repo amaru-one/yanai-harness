@@ -80,6 +80,22 @@ func TestExtractCreatesEveryTemplateAndAManifest(t *testing.T) {
 	}
 }
 
+func TestProjectStartsWithBlankPrompts(t *testing.T) {
+	dest := t.TempDir()
+	if _, _, err := ExtractProject(dest); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"ingeniero.md", "arquitecto-bd.md", "disenador.md"} {
+		if got := read(t, filepath.Join(dest, "prompts", name)); got != "" {
+			t.Errorf("%s should start blank", name)
+		}
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(read(t, filepath.Join(dest, "yanai.config.json"))), &cfg); err != nil {
+		t.Fatalf("starter config is invalid JSON: %v", err)
+	}
+}
+
 func TestReExtractReportsUnchangedAndWritesNothing(t *testing.T) {
 	dest := t.TempDir()
 	extract(t, dest)

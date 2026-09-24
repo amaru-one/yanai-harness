@@ -1,6 +1,8 @@
 package workflow
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -21,15 +23,26 @@ type CheckTool struct {
 }
 
 type Check struct {
-	ID               string   `json:"id"`
-	Args             []string `json:"args"`
-	Dir              string   `json:"dir"`
-	TimeoutSeconds   int      `json:"timeout_seconds"`
-	RequiresPostgres bool     `json:"requires_postgres,omitempty"`
-	Evidence         string   `json:"evidence,omitempty"`
-	SuccessPattern   string   `json:"success_pattern,omitempty"`
-	FailurePattern   string   `json:"failure_pattern,omitempty"`
+	ID             string   `json:"id"`
+	Args           []string `json:"args"`
+	Dir            string   `json:"dir"`
+	TimeoutSeconds int      `json:"timeout_seconds"`
+	RequiredEnv    []string `json:"required_env,omitempty"`
+	PostgresURLVar string   `json:"postgres_url_var,omitempty"`
+	Evidence       string   `json:"evidence,omitempty"`
+	SuccessPattern string   `json:"success_pattern,omitempty"`
+	FailurePattern string   `json:"failure_pattern,omitempty"`
 }
+
+// Check refuses removed or misspelled fields instead of silently weakening a
+// required check when an older workspace is opened.
+func (c *Check) UnmarshalJSON(data []byte) error {
+	type wire Check
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode((*wire)(c))
+}
+
 type ExecutionPolicy struct {
 	MaxTokens        int64                 `json:"max_tokens"`
 	MaxCostUSD       float64               `json:"max_cost_usd"`
@@ -77,6 +90,16 @@ func (p ExecutionPolicy) Validate() error {
 		if err := ValidateCheckEvidence(c); err != nil {
 			return err
 		}
+		envSeen := map[string]bool{}
+		for _, name := range c.RequiredEnv {
+			if !ValidCheckEnvName(name) || envSeen[name] {
+				return fmt.Errorf("check %s has an invalid or duplicate required environment name", c.ID)
+			}
+			envSeen[name] = true
+		}
+		if c.PostgresURLVar != "" && !envSeen[c.PostgresURLVar] {
+			return fmt.Errorf("check %s postgres_url_var must name a required_env entry", c.ID)
+		}
 		if c.Args[0] != "go" {
 			if _, ok := p.Tools[c.Args[0]]; !ok {
 				return fmt.Errorf("check %s uses a tool not in execution.tools", c.ID)
@@ -88,6 +111,19 @@ func (p ExecutionPolicy) Validate() error {
 		seen[c.ID] = true
 	}
 	return nil
+}
+
+// Check inputs may name project-specific test variables, never process or
+// language-runtime controls that could redirect an approved executable.
+func ValidCheckEnvName(name string) bool {
+	if !regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`).MatchString(name) || strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_") || strings.HasPrefix(name, "GIT_") {
+		return false
+	}
+	switch name {
+	case "PATH", "HOME", "TMPDIR", "GOTMPDIR", "GOCACHE", "GOMODCACHE", "GOPATH", "GOENV", "GOWORK", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GOVCS", "GOTELEMETRY", "GOFLAGS", "CGO_ENABLED", "LANG", "TZ", "PYTHONPATH", "PYTHONHOME", "NODE_OPTIONS", "RUSTFLAGS", "OPENROUTER_API_KEY", "BASH_ENV", "ENV", "CDPATH", "RUBYOPT", "PERL5OPT":
+		return false
+	}
+	return true
 }
 func (p ExecutionPolicy) ReserveCost(model string, input, output int64) (float64, error) {
 	price, ok := p.Prices[model]

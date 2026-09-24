@@ -1,11 +1,9 @@
-// Package templates carries the embedded files that 'yanai init' writes out,
+// Package templates provides starter files that 'yanai init' writes out,
 // and the rules for bringing an existing workspace up to date with them.
 //
-// The prompts and context documents are the product: a correction to a prompt
-// is only worth making if it reaches the workspaces people actually run. Plain
-// skip-if-exists extraction meant it never did. So init records what it wrote,
+// Starter prompts and context documents are blank. Init records what it wrote,
 // and a later init compares three versions of each file — the one on disk, the
-// one it originally wrote, and the one embedded in the binary — to tell an
+// one it originally wrote, and the one supplied by the binary — to tell an
 // upstream change apart from the user's own edit.
 //
 // The rule that governs all of it: a file the user edited is never overwritten.
@@ -13,22 +11,30 @@ package templates
 
 import (
 	"crypto/sha256"
-	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"testing/fstest"
 )
 
-//go:embed files
-var embedded embed.FS
+// New workspaces start with blank Markdown files. The operator supplies their
+// content locally; no project-specific documents are shipped in the binary.
+var embedded fs.FS = fstest.MapFS{
+	"files/context/alcance.md":         &fstest.MapFile{Data: []byte{}},
+	"files/context/producto.md":        &fstest.MapFile{Data: []byte{}},
+	"files/prompts/arquitecto-bd.md":  &fstest.MapFile{Data: []byte{}},
+	"files/prompts/disenador.md":      &fstest.MapFile{Data: []byte{}},
+	"files/prompts/ingeniero.md":      &fstest.MapFile{Data: []byte{}},
+	"files/yanai.config.json":         &fstest.MapFile{Data: []byte(defaultConfig)},
+}
 
-// TemplateVersion is bumped whenever the embedded files change in a way users
+// TemplateVersion is bumped whenever the starter files change in a way users
 // should be told about. It is recorded in the manifest so an upgrade can be
 // reported as a version step rather than an unexplained set of diffs.
-const TemplateVersion = 8
+const TemplateVersion = 9
 
 // ManifestName is the record init leaves in the workspace. It is what makes
 // "you edited this" distinguishable from "we changed this".
@@ -120,7 +126,7 @@ func extractTemplates(dest string, project bool) (results []Result, fromVersion 
 			return os.MkdirAll(destPath, 0o755)
 		}
 
-		want, err := embedded.ReadFile(path)
+		want, err := fs.ReadFile(embedded, path)
 		if err != nil {
 			return err
 		}

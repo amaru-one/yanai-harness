@@ -58,7 +58,7 @@ func fixture(t *testing.T, checks []workflow.Check, tools ...map[string]workflow
 	s, err := workflow.OpenStore(filepath.Join(workspace, "workflow.db"), "test")
 	must(t, err)
 	t.Cleanup(func() { s.Close() })
-	o := Options{Repo: config.Repo{Path: repo, AllowedPaths: []string{"yanai-server"}, ExcludeDirs: []string{"vendor"}}, Store: s, Artifacts: workflow.ArtifactStore{Root: workspace}, Cycle: 1, GoCache: t.TempDir(), ModuleCache: t.TempDir(), AdminURL: "postgres://test:test@127.0.0.1:55432/postgres?sslmode=disable"}
+	o := Options{Repo: config.Repo{Path: repo, AllowedPaths: []string{"yanai-server"}, ExcludeDirs: []string{"vendor"}}, Store: s, Artifacts: workflow.ArtifactStore{Root: workspace}, Cycle: 1, GoCache: t.TempDir(), ModuleCache: t.TempDir(), CheckInputs: map[string]string{"TEST_DATABASE_URL": "postgres://test:test@127.0.0.1:55432/postgres?sslmode=disable"}}
 	approve(t, &o, checks, []string{"yanai-server/a.go", "yanai-server/b.md", "yanai-server/new/deep/c.md", "yanai-server/0 new.md", "yanai-server/tab\t.md", "yanai-server/é.md"}, tools...)
 	n, err := Open(o)
 	must(t, err)
@@ -336,17 +336,17 @@ func TestNativeCrashRecovery(t *testing.T) {
 }
 
 func TestNativeCheckBoundaryAndEvidence(t *testing.T) {
-	checks := []workflow.Check{{ID: "test", RequiresPostgres: true, Args: []string{"go", "test", "-race", "-shuffle=on", "./..."}, Dir: "yanai-server", TimeoutSeconds: 1}}
+	checks := []workflow.Check{{ID: "test", RequiredEnv: []string{"TEST_DATABASE_URL"}, PostgresURLVar: "TEST_DATABASE_URL", Args: []string{"go", "test", "-race", "-shuffle=on", "./..."}, Dir: "yanai-server", TimeoutSeconds: 1}}
 	o, n := fixture(t, checks)
 	script := filepath.Join(t.TempDir(), "go")
-	must(t, os.WriteFile(script, []byte("#!/bin/sh\npwd\nprintf '%s\\n' \"$@\"\nenv | /usr/bin/grep -E '^(OPENROUTER_API_KEY|GOFLAGS|DATABASE_URL|GOPROXY|YANAI_TEST_ADMIN_URL)='\n"), 0o755))
+	must(t, os.WriteFile(script, []byte("#!/bin/sh\npwd\nprintf '%s\\n' \"$@\"\nenv | /usr/bin/grep -E '^(OPENROUTER_API_KEY|GOFLAGS|DATABASE_URL|GOPROXY|TEST_DATABASE_URL)='\n"), 0o755))
 	n.o.GoBinary = script
 	t.Setenv("OPENROUTER_API_KEY", "must-not-leak")
 	t.Setenv("GOFLAGS", "-toolexec=evil")
 	t.Setenv("DATABASE_URL", "must-not-leak-either")
 	result, err := n.Check(context.Background(), "test")
 	must(t, err)
-	if result.ExitCode != 0 || result.Before != result.After || !strings.Contains(result.Output, "yanai-server") || strings.Contains(result.Output, "must-not-leak") || strings.Contains(result.Output, "GOFLAGS=") || !strings.Contains(result.Output, "GOPROXY=off") || strings.Contains(result.Output, o.AdminURL) {
+	if result.ExitCode != 0 || result.Before != result.After || !strings.Contains(result.Output, "yanai-server") || strings.Contains(result.Output, "must-not-leak") || strings.Contains(result.Output, "GOFLAGS=") || !strings.Contains(result.Output, "GOPROXY=off") || strings.Contains(result.Output, o.CheckInputs["TEST_DATABASE_URL"]) {
 		t.Fatalf("unsafe evidence: %+v", result)
 	}
 	evidence, err := o.Artifacts.Read(o.Store, 1, result.Evidence.ID)
@@ -361,11 +361,11 @@ func TestNativeCheckBoundaryAndEvidence(t *testing.T) {
 	if _, err = n.Check(context.Background(), "unapproved"); err == nil {
 		t.Fatal("unknown check executed")
 	}
-	n.o.AdminURL = ""
+	n.o.CheckInputs["TEST_DATABASE_URL"] = ""
 	if _, err = n.Check(context.Background(), "test"); err == nil {
 		t.Fatal("database skipping allowed")
 	}
-	n.o.AdminURL = o.AdminURL
+	n.o.CheckInputs["TEST_DATABASE_URL"] = "postgres://test:test@127.0.0.1:55432/postgres?sslmode=disable"
 	must(t, os.WriteFile(script, []byte("#!/bin/sh\necho failed\nexit 7\n"), 0o755))
 	result, err = n.Check(context.Background(), "test")
 	if err == nil || result.ExitCode != 7 || !strings.Contains(result.Output, "failed") {
