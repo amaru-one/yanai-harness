@@ -9,7 +9,7 @@ import (
 // storeSchemaVersion is the ladder this binary knows how to run. OpenStore
 // refuses a database stamped with a newer version: an old binary must never
 // guess at what a newer schema's columns mean.
-const storeSchemaVersion = 5
+const storeSchemaVersion = 6
 
 // migrations are applied in order, each in its own transaction, and never
 // rewritten once released — a later version only appends. Table DDL uses
@@ -200,6 +200,76 @@ CREATE TABLE workflow_observations (
  PRIMARY KEY(project, cycle, id)
 );
 `,
+	// v6: level 0 orchestration. A parent proposes one worker; the worker runs
+	// a saved tool loop; Git operations on the ticket branch are journaled; the
+	// closing project-state update needs its own human acceptance. The parent
+	// spends from its own budget bucket. No existing row is rewritten.
+	`
+ALTER TABLE workflow_attempts ADD COLUMN bucket TEXT NOT NULL DEFAULT 'worker';
+ALTER TABLE workflow_sessions ADD COLUMN bucket TEXT NOT NULL DEFAULT 'worker';
+CREATE TABLE workflow_parent_budgets (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, policy TEXT NOT NULL,
+ tokens INTEGER NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0,
+ calls INTEGER NOT NULL DEFAULT 0, repairs INTEGER NOT NULL DEFAULT 0,
+ active_ms INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(project, cycle)
+);
+CREATE TABLE workflow_orchestration_proposals (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, id TEXT NOT NULL,
+ input_hash TEXT NOT NULL, worker TEXT NOT NULL DEFAULT '', state TEXT NOT NULL,
+ validation TEXT NOT NULL DEFAULT '', payload TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ PRIMARY KEY(project, cycle, id)
+);
+CREATE TABLE workflow_agent_steps (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, run TEXT NOT NULL, seq INTEGER NOT NULL,
+ role TEXT NOT NULL, state TEXT NOT NULL, tool_call_id TEXT, tool_name TEXT NOT NULL DEFAULT '',
+ payload TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(project, cycle, run, seq),
+ UNIQUE(project, cycle, run, tool_call_id)
+);
+CREATE TABLE workflow_git_sessions (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, contract_hash TEXT NOT NULL,
+ state TEXT NOT NULL, payload TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+ updated_at TEXT NOT NULL,
+ PRIMARY KEY(project, cycle, contract_hash)
+);
+CREATE TABLE workflow_git_operations (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, contract_hash TEXT NOT NULL, id TEXT NOT NULL,
+ kind TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(project, cycle, contract_hash, id)
+);
+CREATE TABLE workflow_state_proposals (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, hash TEXT NOT NULL,
+ state TEXT NOT NULL, payload TEXT NOT NULL,
+ created_at TEXT NOT NULL, accepted_at TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(project, cycle, hash)
+);
+CREATE TABLE workflow_config_activations (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, contract_hash TEXT NOT NULL,
+ state TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(project, cycle, contract_hash)
+);
+`,
+}
+
+// preMigrationChecks refuses to cross a version boundary that would strand
+// in-progress work of the older binary. Version 6 changes what an approval
+// may authorize, so a patch an older binary left half-applied must be
+// reconciled by that binary first; after migration its recovery path is gone.
+func preMigrationChecks(db *sql.DB, from int) error {
+	if from != 5 {
+		return nil
+	}
+	var pending int
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_patch_states WHERE post_hash<>''`).Scan(&pending); err != nil {
+		return err
+	}
+	if pending > 0 {
+		return fmt.Errorf("this workspace has %d unfinished repository mutation(s) from the previous yanai version; run the previous binary's 'yanai run' to reconcile them before upgrading", pending)
+	}
+	return nil
 }
 
 // applyMigrations brings db up to storeSchemaVersion, or refuses if the
@@ -238,6 +308,9 @@ func applyMigrations(db *sql.DB) error {
 		return fmt.Errorf("workflow store is at schema version %d, newer than this binary's %d; upgrade yanai", current, storeSchemaVersion)
 	}
 	for v := current; v < len(migrations); v++ {
+		if err := preMigrationChecks(db, v); err != nil {
+			return err
+		}
 		tx, err := db.Begin()
 		if err != nil {
 			return err

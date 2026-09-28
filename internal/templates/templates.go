@@ -23,18 +23,19 @@ import (
 // New workspaces start with blank Markdown files. The operator supplies their
 // content locally; no project-specific documents are shipped in the binary.
 var embedded fs.FS = fstest.MapFS{
-	"files/context/alcance.md":         &fstest.MapFile{Data: []byte{}},
-	"files/context/producto.md":        &fstest.MapFile{Data: []byte{}},
-	"files/prompts/arquitecto-bd.md":  &fstest.MapFile{Data: []byte{}},
-	"files/prompts/disenador.md":      &fstest.MapFile{Data: []byte{}},
-	"files/prompts/ingeniero.md":      &fstest.MapFile{Data: []byte{}},
-	"files/yanai.config.json":         &fstest.MapFile{Data: []byte(defaultConfig)},
+	"files/project/alcance.md": &fstest.MapFile{Data: []byte(alcanceTemplate)},
+	"files/project/estado.md":  &fstest.MapFile{Data: []byte(estadoTemplate)},
+	"files/yanai.config.json":  &fstest.MapFile{Data: []byte(defaultConfig)},
 }
+
+// Directories init creates empty. prompts/base holds optional operator base
+// prompts; prompts/generated holds the parent's per-ticket worker prompts.
+var directories = []string{"prompts/base", "prompts/generated", "tickets", "cycles"}
 
 // TemplateVersion is bumped whenever the starter files change in a way users
 // should be told about. It is recorded in the manifest so an upgrade can be
 // reported as a version step rather than an unexplained set of diffs.
-const TemplateVersion = 9
+const TemplateVersion = 11
 
 // ManifestName is the record init leaves in the workspace. It is what makes
 // "you edited this" distinguishable from "we changed this".
@@ -197,6 +198,11 @@ func extractTemplates(dest string, project bool) (results []Result, fromVersion 
 		return nil, fromVersion, err
 	}
 
+	for _, dir := range directories {
+		if err := os.MkdirAll(filepath.Join(dest, filepath.FromSlash(dir)), 0o755); err != nil {
+			return nil, fromVersion, err
+		}
+	}
 	sort.Slice(results, func(i, j int) bool { return results[i].Path < results[j].Path })
 	return results, fromVersion, writeManifest(dest, next)
 }

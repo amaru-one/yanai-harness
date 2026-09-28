@@ -27,35 +27,38 @@ import (
 	"github.com/yanai/yanai-harness/internal/ws"
 )
 
-const usage = `yanai — engineer-led development team
+const usage = `yanai — a parent agent creates the worker that resolves each ticket
 
 USAGE
   yanai <command> [options]
 
 COMMANDS
   init --repo PATH [--module-dir DIR] [--allow paths]  Bind an explicit Git repository
-  plan [--retry-unresolved] <ticket.md>               Plan an already-decided ticket
+  plan [--retry-unresolved] <ticket.md>               The parent proposes one worker and one task
   resolve --observation ID --note "..."               Record a human response
-  status [--json] [--attempts]                        Show cycle, observations, budget
-  review                                             Show contract and review token
-  approve [--contract TOKEN] [--note "..."]            Human execution gate
-  reject --note "..."                                 Reject a plan
-  invalidate --note "..."                             Revoke approval before replanning
-  run [--task ID] [--retry-unresolved]                 Apply approved changes and checks
-  policy [--note "..."]                               Inspect or adopt configured limits
+  status [--json] [--attempts]                        Show cycle, worker, branch, budgets, observations
+  review                                             Show the proposal (or the final report) and its token
+  approve --contract TOKEN [--note "..."]              The single human execution approval
+  reject --note "..."                                 Reject a proposal
+  invalidate --note "..."                             Revoke approval
+  run [--retry-unresolved]                            Run the worker on its ticket branch, then close
+  close --state-update HASH                           Accept the reviewed project-state update
+  policy                                             Inspect worker and parent budgets
   reconcile-attempt --id ID --cost-usd N --tokens N --reference ...
   context [--files a,b]                               Inspect repository context
 
 Every command accepts --ws PATH (default: $YANAI_WS or ./yanai-workspace).
 OPENROUTER_API_KEY configures paid calls; YANAI_MOCK=1 uses synthetic responses.
-Check-specific inputs, including disposable loopback PostgreSQL URLs, come from
-the approved ticket's Check inputs section. YANAI_GO_BINARY, YANAI_GO_CACHE, YANAI_GO_MODCACHE override
-check toolchain/cache locations. Checks use approved tool allowlists; Go has built-in compatibility support.
+Check-specific inputs come from the approved ticket's Check inputs section and
+reach only approved checks. YANAI_GO_BINARY, YANAI_GO_CACHE, YANAI_GO_MODCACHE
+override check toolchain/cache locations.
 
 FLOW
-  plan → resolve every observation → review → approve → run → awaiting_review
-  Execution observations also require resolution and fresh review/approval.
-  No automatic commit, merge, deployment, or destructive database action.
+  project/alcance.md + project/estado.md + ticket (with ## Type)
+  plan → resolve observations → review → approve → run → review → close
+  The worker commits only on <type>/<slug> in the configured checkout; the
+  checkout returns to its original branch. No merge, push, deploy, or
+  destructive database action.
 `
 
 func main() {
@@ -101,6 +104,8 @@ func run() error {
 		return cmdRun(args)
 	case "context":
 		return cmdContext(args)
+	case "close":
+		return cmdClose(args)
 	default:
 		fmt.Print(usage)
 		return fmt.Errorf("unknown command: %s", command)
@@ -199,11 +204,18 @@ func cmdInit(args []string) error {
 	printTemplateResults(results, fromVersion)
 	fmt.Printf(`
 Next steps:
-  1. Review yanai.config.json: allowed paths, models, limits, prices, and checks.
-  2. Keep your local engineer, DB architect, and designer prompts as configured.
-  3. export OPENROUTER_API_KEY=sk-or-...
-  4. yanai plan tickets/task.md
+  1. Describe the project in project/alcance.md (scope) and project/estado.md (current state).
+  2. Review yanai.config.json: orchestrator model and budget with price bounds,
+     allowed paths, execution limits, and at least one project check.
+     Define the "models" catalog: per role category, the 1-5 models the parent
+     may choose from for its worker (each needs an execution.prices entry).
+  3. Optionally add base prompts to prompts/base/ (e.g. backend-go.md).
+  4. export OPENROUTER_API_KEY=sk-or-...
+  5. Write a ticket with ## Type (feat, fix, ...) and run: yanai plan tickets/task.md
 `)
+	if existingConfig != nil && existingConfig.Orchestrator.Model == "" {
+		fmt.Println("This workspace has no orchestrator configured yet: add an \"orchestrator\" section (model, budget, prices) before planning.")
+	}
 	return nil
 }
 
@@ -298,6 +310,17 @@ func bindWorkspace(path string) (*team.Runner, func(), error) {
 	cleanup, err := attachStore(w, cfg)
 	if err != nil {
 		return nil, nil, err
+	}
+	// An interrupted approval may have left the approved configuration
+	// unactivated; finish that before trusting the live file.
+	if activated, err := team.RecoverConfigActivations(w); err != nil {
+		cleanup()
+		return nil, nil, err
+	} else if activated {
+		if cfg, err = config.Load(path); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
 	}
 	return &team.Runner{Cfg: cfg, Workspace: w}, cleanup, nil
 }
@@ -449,14 +472,11 @@ func cmdStatus(args []string) error {
 	}
 	fmt.Printf("Cycle:   %03d\n", st.Cycle)
 	fmt.Printf("Phase:   %s\n", st.Phase)
-	if st.Verdict != "" {
-		fmt.Printf("Verdict: %s\n", st.Verdict)
+	if st.Markdown != nil {
+		fmt.Printf("Ticket:  %s (%s)\n", st.Markdown.Title, st.Markdown.Type)
 	}
 	if w.Store != nil {
-		if budget, err := w.Store.Budget(st.Cycle); err == nil {
-			data, _ := json.MarshalIndent(budget, "", "  ")
-			fmt.Printf("Budget:\n%s\n", data)
-		}
+		printOrchestration(w, st)
 	}
 	if w.Store != nil {
 		observations, e := w.Store.Observations(st.Cycle)
@@ -508,51 +528,92 @@ func printUnresolvedAttempts(w *ws.Workspace) error {
 	return nil
 }
 
-// verdictMeaning renders a terminal finding in the user's words.
-func verdictMeaning(v string) string {
-	switch strings.ToUpper(v) {
-	case team.VerdictNoChangeNeeded:
-		return "the app covers what the interviewed teachers need."
-	case team.VerdictNeedsEvidence:
-		return "There is not enough evidence to decide. Submit a revised ticket with the missing evidence."
-	case team.VerdictOutOfScope:
-		return "what the teachers asked for falls outside the defined scope. The need stands; this project won't address it."
-	case team.VerdictBlockedByBaseline:
-		return "the proposal can't be evaluated until the backend baseline is established."
-	default:
-		return "cycle closed with verdict " + v + "."
-	}
-}
-
 func suggestion(st *ws.State) string {
-	if st.Markdown != nil && st.Phase == ws.PhaseAnalyzed {
-		return "Resolve observations, then resume: yanai plan <ticket.md>"
-	}
-
 	switch st.Phase {
 	case ws.PhaseAnalyzed:
-		return "Resolve observations, then resume: yanai plan <ticket.md>"
+		return "Resolve observations (yanai resolve), then resume: yanai plan <ticket.md>"
 	case ws.PhaseNoChange:
-		return "No change needed: retain the positive evidence; reassess when new evidence arrives."
-	case ws.PhaseNeedsEvidence:
-		return "Collect the requested evidence, then submit a revised ticket."
-	case ws.PhaseOutOfScope:
-		return "Request is outside scope. Submit a revised ticket if the scope changes."
-	case ws.PhaseBlockedBaseline:
-		return "Resolve the recorded baseline blocker, then submit the ticket again."
+		return "The worker found nothing to change; the checkout is on its original branch."
 	case ws.PhaseWaiting:
-		return "⏸  Awaiting your decision:  yanai approve   |   yanai reject --note \"...\""
+		return "⏸  Awaiting your decision:  yanai review, then yanai approve --contract TOKEN   |   yanai reject --note \"...\""
 	case ws.PhaseRejected:
-		return "Plan rejected. Resume with a revised ticket: yanai plan <ticket.md>"
+		return "Plan rejected. Revise the ticket and run: yanai plan <ticket.md>"
 	case ws.PhaseApproved:
 		return "Next step:  yanai run"
 	case ws.PhaseAwaitingExecution:
-		return "Execution is ready to resume: 'yanai review', 'yanai approve', 'yanai run'."
+		return "The worker paused: answer observations (yanai resolve), then yanai review, yanai approve --contract TOKEN, yanai run."
 	case ws.PhaseAwaitingReview:
-		return "The approved change is applied in the configured checkout and its checks passed.\nReview the uncommitted diff and recorded evidence. Independent technical review is not implemented."
+		return "Review the ticket branch and the proposed state update: yanai review, then yanai close --state-update HASH.\nIf no update is proposed yet, run 'yanai run' to let the parent propose one."
+	case ws.PhaseCompleted:
+		return "Cycle completed. The ticket branch remains for your Git review; nothing was merged."
 	default:
 		return "Next step:  yanai plan <ticket.md>"
 	}
+}
+
+// printOrchestration shows the level 0 view of a cycle: who works, where,
+// what it last did, and what it may still spend.
+func printOrchestration(w *ws.Workspace, st *ws.State) {
+	o := st.Orchestration
+	if o == nil {
+		fmt.Println("Workflow: legacy cycle (inspect only)")
+		return
+	}
+	if o.Worker != "" {
+		fmt.Printf("Worker:  %s\n", o.Worker)
+	}
+	if o.TicketBranch != "" {
+		fmt.Printf("Branch:  %s\n", o.TicketBranch)
+	}
+	if st.Approval != nil && st.Approval.ContractHash != "" {
+		if session, _, found, err := w.Store.GitSession(st.Cycle, st.Approval.ContractHash); err == nil && found {
+			fmt.Printf("Git:     %s on %s at %s (original %s at %s), %d commit(s)\n", session.State, session.ExpectedBranch, short(session.ExpectedSHA), session.OriginalBranch, short(session.OriginalSHA), len(session.Commits))
+			for _, c := range session.Commits {
+				fmt.Printf("           %s %s\n", short(c.SHA), c.Subject)
+			}
+		}
+		if last := lastStep(w, st); last != "" {
+			fmt.Printf("Last:    %s\n", last)
+		}
+	}
+	for _, bucket := range []string{workflow.BucketParent, workflow.BucketWorker} {
+		if b, err := w.Store.BucketBudget(st.Cycle, bucket); err == nil {
+			fmt.Printf("Budget %-6s tokens %d/%d · $%.4f/$%.4f · calls %d/%d · repairs %d/%d · active %ds/%ds\n", bucket+":", b.Tokens, b.Policy.MaxTokens, b.Cost, b.Policy.MaxCostUSD, b.Calls, b.Policy.MaxCalls, b.Repairs, b.Policy.MaxRepairs, b.ActiveMS/1000, b.Policy.MaxActiveSeconds)
+		}
+	}
+	if o.Outcome != "" {
+		fmt.Printf("Outcome: %s %s\n", o.Outcome, o.Explanation)
+	}
+	if p, found, err := w.Store.LatestStateProposal(st.Cycle); err == nil && found {
+		fmt.Printf("State update: %s (%s)\n", p.Hash, p.State)
+	}
+}
+
+func lastStep(w *ws.Workspace, st *ws.State) string {
+	var latest workflow.AgentStep
+	for _, prefix := range []string{"work-", "close-"} {
+		runs, err := w.Store.AgentRuns(st.Cycle, prefix)
+		if err != nil {
+			continue
+		}
+		for _, run := range runs {
+			steps, err := w.Store.AgentSteps(st.Cycle, run)
+			if err == nil && len(steps) > 0 {
+				latest = steps[len(steps)-1]
+			}
+		}
+	}
+	if latest.Run == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s step %d %s (%s)", latest.Role, latest.Seq, latest.ToolName, latest.State)
+}
+
+func short(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 func printTasks(st *ws.State) {
@@ -621,7 +682,6 @@ func cmdReject(args []string) error {
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	path := wsPath(fs)
-	task := fs.String("task", "", "run only this task (e.g. T-002)")
 	retryUnresolved := fs.Bool("retry-unresolved", false, "acknowledge an interrupted prior model call (cost unknown) and proceed")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -634,10 +694,10 @@ func cmdRun(args []string) error {
 	ctx, cancel := withContext()
 	defer cancel()
 
-	st, err := r.Execute(ctx, *task, *retryUnresolved)
+	st, err := r.Execute(ctx, *retryUnresolved)
 	if st != nil {
 		printTasks(st)
-		fmt.Printf("\nApplied to: %s\nEvidence:   %s\n", r.Cfg.Repo.Path, filepath.Join(r.Workspace.CycleDir(st.Cycle), "execution"))
+		fmt.Printf("\nCheckout:  %s\nEvidence:  %s\n", r.Cfg.Repo.Path, r.Workspace.CycleDir(st.Cycle))
 	}
 	if err != nil {
 		return err
@@ -682,5 +742,28 @@ func cmdContext(args []string) error {
 	}
 	fmt.Println(text)
 	fmt.Fprintln(os.Stderr, "\n(this is the index every agent sees first; use --files a,b,c to preview a selection)")
+	return nil
+}
+
+func cmdClose(args []string) error {
+	fs := flag.NewFlagSet("close", flag.ExitOnError)
+	path := wsPath(fs)
+	hash := fs.String("state-update", "", "state update hash shown by yanai review")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *hash == "" {
+		return fmt.Errorf("close requires --state-update HASH from 'yanai review'")
+	}
+	r, cleanup, err := bindWorkspace(*path)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	st, err := r.Close(*hash)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Cycle %03d completed. project/estado.md updated; the ticket branch remains for your Git review.\n", st.Cycle)
 	return nil
 }

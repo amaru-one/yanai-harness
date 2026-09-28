@@ -35,6 +35,9 @@ func (n *Native) Apply(ticket string, edits []Edit) (Receipt, error) {
 	if err != nil {
 		return Receipt{}, err
 	}
+	if err = n.writableBranch(); err != nil {
+		return Receipt{}, err
+	}
 	_, revision, err := n.o.Store.PatchState(n.o.Cycle, n.o.Contract)
 	if err != nil {
 		return Receipt{}, err

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/yanai/yanai-harness/internal/executor"
 	"github.com/yanai/yanai-harness/internal/workflow"
 	"github.com/yanai/yanai-harness/internal/ws"
 )
@@ -41,11 +40,4 @@ func (r *Runner) recordCheckBlocker(st *ws.State, issue error) error {
 		return err
 	}
 	return fmt.Errorf("check prerequisites are not ready: %w", issue)
-}
-
-func (r *Runner) preflightChecks(st *ws.State, inputs map[string]string) error {
-	if err := executor.Preflight(r.Cfg.Repo, r.Workspace.Root, r.Cfg.Execution, inputs); err != nil {
-		return r.recordCheckBlocker(st, err)
-	}
-	return nil
 }

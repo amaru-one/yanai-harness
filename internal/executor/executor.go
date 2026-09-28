@@ -79,8 +79,15 @@ type Native struct {
 	root     *os.Root
 	contract workflow.ExecutionContract
 	base     workflow.RepositoryState
-	unlock   func()
-	closed   bool
+	// head is the committed state status predictions compare against: the
+	// approved base until the first commit on the ticket branch, then the
+	// state after the latest recorded commit.
+	head workflow.RepositoryState
+	// branch is the branch the checkout must be on for a level 0 contract;
+	// empty when the contract has no Git terms.
+	branch string
+	unlock func()
+	closed bool
 	// Fault injection is package-private and used to exercise disk/DB boundaries.
 	fault func(string) error
 }
@@ -130,8 +137,23 @@ func Open(o Options) (*Native, error) {
 	if err = n.contract.ValidateExecutable(live, branch); err != nil {
 		return nil, err
 	}
-	if n.base.Root != t.Root || n.base.CommonDir != t.CommonDir || n.base.Head != live.Head || n.base.Dirty {
-		return nil, errors.New("executor requires the approved clean checkout")
+	n.head = n.base
+	if n.contract.Level0 == nil {
+		if n.base.Root != t.Root || n.base.CommonDir != t.CommonDir || n.base.Head != live.Head || n.base.Dirty {
+			return nil, errors.New("executor requires the approved clean checkout")
+		}
+	} else {
+		if n.base.Root != t.Root || n.base.CommonDir != t.CommonDir || n.base.Dirty || n.base.Head != n.contract.Level0.BaseSHA {
+			return nil, errors.New("executor requires the approved clean base commit")
+		}
+		n.branch = n.contract.Level0.OriginalBranch
+		session, _, found, err := o.Store.GitSession(o.Cycle, o.Contract)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			n.head, n.branch = session.HeadState, session.ExpectedBranch
+		}
 	}
 	for _, check := range n.contract.Policy.Checks {
 		if err = validateCheck(check, n.contract.Policy.Tools); err != nil {
@@ -147,6 +169,9 @@ func Open(o Options) (*Native, error) {
 		}
 	}
 	if err = n.recover(); err != nil {
+		return nil, err
+	}
+	if err = n.recoverGit(); err != nil {
 		return nil, err
 	}
 	if _, err = n.guard(); err != nil {
@@ -186,6 +211,15 @@ func (n *Native) guard() (workflow.RepositoryState, error) {
 	actual, err := n.target.Snapshot()
 	if err != nil {
 		return actual, err
+	}
+	if n.branch != "" {
+		branch, err := n.target.Branch()
+		if err != nil {
+			return actual, err
+		}
+		if branch != n.branch {
+			return actual, fmt.Errorf("unexpected branch: the checkout is on %q but the engine recorded %q; nothing was changed, reconcile manually", branch, n.branch)
+		}
 	}
 	if actual.Baseline() != expected.Baseline() {
 		// One message for one condition: the checkout is not what the engine
@@ -249,6 +283,14 @@ func (n *Native) Read(path string) (*File, error) {
 		return nil, err
 	}
 	return n.read(path)
+}
+
+// InAllowedPaths reports whether path is inside this backend's configured
+// boundary. Callers that probe for optional, harness-generated paths (such
+// as a governing AGENTS.md that may sit outside repo.allowed_paths) use it
+// to skip a path that is out of scope by configuration, rather than failing.
+func (n *Native) InAllowedPaths(path string) bool {
+	return n.target.CheckPath(path) == nil
 }
 func (n *Native) Search(paths []string, literal string) ([]Match, error) {
 	n.mu.Lock()
@@ -366,13 +408,13 @@ func (n *Native) predict(before workflow.RepositoryState, edits []Edit) workflow
 	for _, e := range edits {
 		if e.After != nil {
 			next.Content[e.Path] = fingerprint(e.After)
-		} else if _, tracked := n.base.Content[e.Path]; tracked {
+		} else if _, tracked := n.head.Content[e.Path]; tracked {
 			next.Content[e.Path] = "deleted"
 		} else {
 			delete(next.Content, e.Path)
 		}
 	}
-	status := predictedStatus(n.base.Content, next.Content)
+	status := predictedStatus(n.head.Content, next.Content)
 	next.Dirty = len(status) != 0
 	next.StatusHash = fmt.Sprintf("%x", sha256.Sum256(status))
 	return next

@@ -1,5 +1,8 @@
 # Describe the already-decided task
 
+## Type
+feat <!-- feat | fix | refactor | perf | test | docs | build | ci | chore | style -->
+
 ## Task
 Describe the intended change and the existing behavior it should improve.
 

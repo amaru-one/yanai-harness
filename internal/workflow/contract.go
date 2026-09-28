@@ -14,7 +14,14 @@ import (
 // so it is refused rather than reinterpreted. Revision 2 names the execution
 // backend, the candidate wire format, and the exact checkout/branch identity
 // the human saw, so none of those can change between review and execution.
-const ContractVersion = 3
+// Revision 4 adds level 0 terms: a parent-proposed worker, its generated
+// prompt, the activated configuration, and permission to create and commit
+// to exactly one ticket branch. A revision 3 approval never authorized branch
+// or commit operations and is refused rather than reinterpreted.
+const ContractVersion = 5
+
+// ToolProtocolVersion names the worker tool interface bound by approval.
+const ToolProtocolVersion = "level0-tools-v2"
 
 // ExecutionBackendNative and CandidateSchemaVersion are the only values this
 // binary can execute. They are part of the contract (and therefore of its
@@ -49,6 +56,63 @@ type ExecutionContract struct {
 	Inputs      map[string]string `json:"inputs"`
 	Settings    json.RawMessage   `json:"settings"`
 	Policy      ExecutionPolicy   `json:"policy"`
+	Level0      *LevelZeroTerms   `json:"level0,omitempty"`
+}
+
+// WorkerTerms is the approved worker: its model settings and the exact
+// generated prompt it runs with for the whole execution.
+type WorkerTerms struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Purpose      string  `json:"purpose"`
+	Model        string  `json:"model"`
+	Temperature  float64 `json:"temperature"`
+	MaxTokens    int     `json:"max_tokens"`
+	MaxSteps     int     `json:"max_steps"`
+	Prompt       string  `json:"prompt"`
+	PromptSHA256 string  `json:"prompt_sha256"`
+	// The catalog category the parent chose from, the options it had, and
+	// its stated reason. They are part of what the human approved.
+	ModelCategory string             `json:"model_category"`
+	ModelOptions  []ModelOptionTerms `json:"model_options"`
+	ModelReason   string             `json:"model_reason"`
+	// The parent's difficulty rating of the task and what justifies it.
+	TaskComplexity   string `json:"task_complexity"`
+	ComplexityReason string `json:"complexity_reason"`
+}
+
+// ModelOptionTerms is one catalog option exactly as the parent saw it,
+// including its price bounds in USD per million tokens.
+type ModelOptionTerms struct {
+	Model      string   `json:"model"`
+	Difficulty []string `json:"difficulty"`
+	Strengths  string   `json:"strengths"`
+	Weaknesses string   `json:"weaknesses,omitempty"`
+	Benchmarks string   `json:"benchmarks,omitempty"`
+	InputUSD   float64  `json:"input_usd_per_million"`
+	OutputUSD  float64  `json:"output_usd_per_million"`
+}
+
+// LevelZeroTerms are the approval terms specific to a parent-led cycle. The
+// immutable identity is here; the moving Git state (current branch and SHA)
+// lives in the GitSession and the recorded patch state.
+type LevelZeroTerms struct {
+	Proposal          string            `json:"proposal"`
+	TicketType        string            `json:"ticket_type"`
+	Slug              string            `json:"slug"`
+	TicketBranch      string            `json:"ticket_branch"`
+	OriginalBranch    string            `json:"original_branch"`
+	BaseSHA           string            `json:"base_sha"`
+	CommitScope       string            `json:"commit_scope"`
+	CommitModule      string            `json:"commit_module"`
+	Worker            WorkerTerms       `json:"worker"`
+	ToolProtocol      string            `json:"tool_protocol"`
+	ConfigOriginalSHA string            `json:"config_original_sha"`
+	ConfigProposedSHA string            `json:"config_proposed_sha"`
+	ConfigProposed    ArtifactRef       `json:"config_proposed"`
+	ProjectDocuments  map[string]string `json:"project_documents"`
+	BasePrompts       map[string]string `json:"base_prompts"`
+	Provider          json.RawMessage   `json:"provider"`
 }
 
 // ValidateExecutable refuses an older or foreign contract before any model
@@ -70,11 +134,29 @@ func (c ExecutionContract) ValidateExecutable(state RepositoryState, branch stri
 	if strings.TrimSpace(e.Branch) == "" || strings.TrimSpace(e.Head) == "" {
 		return errors.New("execution contract is missing the approved checkout identity")
 	}
-	if e.Root != state.Root || e.CommonDir != state.CommonDir || e.Head != state.Head {
+	if e.Root != state.Root || e.CommonDir != state.CommonDir {
+		return errors.New("approved checkout identity differs from the bound repository; review and approve against the checkout you intend to change")
+	}
+	if c.Level0 != nil {
+		// HEAD and the branch legitimately move on the ticket branch; the
+		// Git session and recorded patch state decide what they must be now.
+		l := c.Level0
+		if l.TicketBranch == "" || l.BaseSHA != e.Head || l.OriginalBranch != e.Branch || l.ToolProtocol != ToolProtocolVersion {
+			return errors.New("level 0 contract is missing its ticket branch terms")
+		}
+		if !c.Policy.Commit {
+			return errors.New("level 0 execution requires execution.commit=true for its ticket branch")
+		}
+		return c.Policy.Validate()
+	}
+	if e.Head != state.Head {
 		return errors.New("approved checkout identity differs from the bound repository; review and approve against the checkout you intend to change")
 	}
 	if e.Branch != branch {
 		return fmt.Errorf("approved branch %q is not the checked-out branch %q; review and approve again", e.Branch, branch)
+	}
+	if c.Policy.Commit {
+		return errors.New("commit permission requires a level 0 ticket branch contract")
 	}
 	return c.Policy.Validate()
 }
@@ -95,6 +177,14 @@ func (s *Store) SaveContract(cycle int, c ExecutionContract) (string, error) {
 // ApproveContract is the only live human gate: approval and transition commit
 // together, and a conditional version prevents stale approval from winning.
 func (s *Store) ApproveContract(a Approval, expected int64, payload string) error {
+	return s.ApproveContractWithActivation(a, expected, payload, nil)
+}
+
+// ApproveContractWithActivation also records, in the same transaction, the
+// intent to activate the approved configuration. The live file is replaced
+// only afterwards, and a restart finishes or rejects that replacement before
+// any worker action.
+func (s *Store) ApproveContractWithActivation(a Approval, expected int64, payload string, activation *ConfigActivation) error {
 	if a.Actor != ActorHuman || a.ContractHash == "" {
 		return errors.New("human approval requires a complete contract")
 	}
@@ -140,6 +230,13 @@ func (s *Store) ApproveContract(a Approval, expected int64, payload string) erro
 	_, err = tx.Exec(`INSERT INTO workflow_patch_states(project,cycle,contract_hash,current_hash,current_json) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING`, s.project, a.Cycle, a.ContractHash, a.Baseline, string(c.Repository))
 	if err != nil {
 		return err
+	}
+	if activation != nil {
+		activation.Contract, activation.State = a.ContractHash, ActivationPending
+		raw, _ := json.Marshal(activation)
+		if _, err = tx.Exec(`INSERT INTO workflow_config_activations(project,cycle,contract_hash,state,payload,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`, s.project, a.Cycle, a.ContractHash, activation.State, string(raw), now()); err != nil {
+			return err
+		}
 	}
 	if err = s.appendEventTx(tx, Event{Cycle: a.Cycle, Actor: ActorHuman, Type: "contract.approved", Payload: a.ContractHash}); err != nil {
 		return err

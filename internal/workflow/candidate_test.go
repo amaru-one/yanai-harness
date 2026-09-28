@@ -11,7 +11,7 @@ func executableTicket() Ticket {
 
 func TestDecodeCandidateAcceptsOnlyCompleteAnswers(t *testing.T) {
 	ticket := executableTicket()
-	good := `{"schema_version":"1","ticket":"T-1","result":"change","explanation":"por qué",
+	good := `{"schema_version":"1","ticket":"T-1","result":"change","explanation":"why",
 		"files":[{"path":"yanai-server/a.go","operation":"source","source":"package a\n"},
 		         {"path":"yanai-server/SPEC.md","operation":"unchanged"}]}`
 	c, err := DecodeCandidate(good, ticket)
@@ -24,14 +24,14 @@ func TestDecodeCandidateAcceptsOnlyCompleteAnswers(t *testing.T) {
 
 	// An empty file is a real file, not an omission: a pointer is what keeps
 	// "" and "missing" distinguishable.
-	empty := `{"schema_version":"1","ticket":"T-1","result":"change","explanation":"vacío",
+	empty := `{"schema_version":"1","ticket":"T-1","result":"change","explanation":"empty",
 		"files":[{"path":"yanai-server/a.go","operation":"source","source":""},
 		         {"path":"yanai-server/SPEC.md","operation":"unchanged"}]}`
 	if c, err = DecodeCandidate(empty, ticket); err != nil || *c.Files[0].Source != "" {
 		t.Fatalf("an empty file was not accepted: %v %+v", err, c)
 	}
 
-	noChange := `{"schema_version":"1","ticket":"T-1","result":"no_change","explanation":"ya está cubierto"}`
+	noChange := `{"schema_version":"1","ticket":"T-1","result":"no_change","explanation":"already covered"}`
 	if c, err = DecodeCandidate(noChange, ticket); err != nil || c.Result != CandidateNoChange {
 		t.Fatalf("no_change: %v %+v", err, c)
 	}
@@ -51,7 +51,7 @@ func TestDecodeCandidateRejectsEverythingTruncationLooksLike(t *testing.T) {
 			         {"path":"yanai-server/SPEC.md","operation":"unchanged"}]}`,
 		"duplicate key":    `{"schema_version":"1","ticket":"T-1","result":"no_change","result":"change","explanation":"x"}`,
 		"unknown field":    `{"schema_version":"1","ticket":"T-1","result":"no_change","explanation":"x","notes":"y"}`,
-		"trailing content": `{"schema_version":"1","ticket":"T-1","result":"no_change","explanation":"x"} ¡listo!`,
+		"trailing content": `{"schema_version":"1","ticket":"T-1","result":"no_change","explanation":"x"} done!`,
 		"truncated":        `{"schema_version":"1","ticket":"T-1","result":"no_change","explanation":"x"`,
 		"wrong schema":     `{"schema_version":"2","ticket":"T-1","result":"no_change","explanation":"x"}`,
 		"wrong ticket":     `{"schema_version":"1","ticket":"T-9","result":"no_change","explanation":"x"}`,
@@ -93,14 +93,22 @@ func TestDecodeCandidateRejectsEverythingTruncationLooksLike(t *testing.T) {
 }
 
 func TestDeclaredOutputsRoundTripsTheChecklist(t *testing.T) {
-	message := "TAREA_DE_EJECUCION\n\n" + TicketHeading + "T-7\n\nDescripción\n" +
+	message := "EXECUTION_TASK\n\n" + TicketHeading + "T-7\n\nDescription\n" +
 		RenderDeclaredOutputs([]string{"yanai-server/a.go", "yanai-server/SPEC.md"}) +
-		"\n# Cómo entregar\n\n" + "instrucciones"
+		"\n# Delivery format\n\n" + "instructions"
 	ticket, outputs := DeclaredOutputs(message)
 	if ticket != "T-7" || len(outputs) != 2 || outputs[0] != "yanai-server/a.go" || outputs[1] != "yanai-server/SPEC.md" {
 		t.Fatalf("ticket=%q outputs=%v", ticket, outputs)
 	}
 	if !strings.Contains(message, DeclaredOutputsHeading) {
 		t.Fatal("the rendered request lost its checklist heading")
+	}
+}
+
+func TestDeclaredOutputsReadsLegacyRequests(t *testing.T) {
+	const message = "# Tu tarea: T-7\n\n# Salidas declaradas (responde exactamente estas rutas, una entrada por cada una)\n\n- server/a.go\n- server/SPEC.md\n\n# Delivery\n"
+	ticket, outputs := DeclaredOutputs(message)
+	if ticket != "T-7" || len(outputs) != 2 || outputs[0] != "server/a.go" || outputs[1] != "server/SPEC.md" {
+		t.Fatalf("legacy request: ticket=%q outputs=%v", ticket, outputs)
 	}
 }

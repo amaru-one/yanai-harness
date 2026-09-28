@@ -2,22 +2,89 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/yanai/yanai-harness/internal/workflow"
 )
 
-// Agent describes a member of the team.
+// Agent describes a worker the parent created (or an operator declared).
+// Worker IDs are data, not code: nothing in the harness branches on them.
 type Agent struct {
 	ID          string  `json:"id"`
 	Name        string  `json:"name"`
+	Purpose     string  `json:"purpose,omitempty"`
 	Model       string  `json:"model"`
 	Temperature float64 `json:"temperature"`
 	MaxTokens   int     `json:"max_tokens"`
-	Prompt      string  `json:"prompt"` // relative path within the workspace
+	// MaxSteps bounds the worker's model turns in one run. Every turn,
+	// including an invalid answer, consumes a step.
+	MaxSteps int    `json:"max_steps,omitempty"`
+	Prompt   string `json:"prompt"` // relative path within the workspace
+	// ModelCategory names the catalog category the parent chose Model from.
+	ModelCategory string `json:"model_category,omitempty"`
+}
+
+// ModelCategory is one kind of role and the models the parent may choose
+// from for it. The operator owns the catalog; the parent can only choose.
+type ModelCategory struct {
+	Description string        `json:"description"`
+	Options     []ModelOption `json:"options"`
+}
+
+// ModelOption is one model the parent may choose, with the operator's notes on
+// what it is good at. The parent reasons only from these notes.
+type ModelOption struct {
+	Model string `json:"model"`
+	// Difficulty lists the task levels (see Difficulties) this model handles.
+	Difficulty []string `json:"difficulty"`
+	Strengths  string   `json:"strengths"`
+	Weaknesses string   `json:"weaknesses,omitempty"`
+	// Benchmarks is free text with figures and their source, e.g.
+	// "SWE-bench Verified 68% (model card, 2026-05)".
+	Benchmarks string `json:"benchmarks,omitempty"`
+}
+
+// Difficulties are the task levels, from easiest to hardest.
+var Difficulties = []string{"baja", "media", "alta"}
+
+// ValidDifficulty reports whether d is one of Difficulties.
+func ValidDifficulty(d string) bool {
+	for _, x := range Difficulties {
+		if x == d {
+			return true
+		}
+	}
+	return false
+}
+
+// Covers reports whether the option declares difficulty d.
+func (o ModelOption) Covers(d string) bool {
+	for _, x := range o.Difficulty {
+		if x == d {
+			return true
+		}
+	}
+	return false
+}
+
+// MaxModelOptions bounds the choices offered per category.
+const MaxModelOptions = 5
+
+// Orchestrator configures the parent agent. Its budget is separate from the
+// worker's execution budget and is captured when a cycle starts, so nothing
+// the parent proposes can raise the limits it is currently running under.
+type Orchestrator struct {
+	Model       string                  `json:"model"`
+	Temperature float64                 `json:"temperature"`
+	MaxTokens   int                     `json:"max_tokens"`
+	MaxSteps    int                     `json:"max_steps"`
+	Budget      workflow.PlanningBudget `json:"budget"`
 }
 
 // Repo describes how to read the source code of the target project.
@@ -49,26 +116,36 @@ type OpenRouter struct {
 
 // Config is the full file.
 type Config struct {
-	Execution  workflow.ExecutionPolicy `json:"execution"`
-	Project    string                   `json:"project"`
-	Repo       Repo                     `json:"repo"`
-	OpenRouter OpenRouter               `json:"openrouter"`
-	Agents     map[string]Agent         `json:"agents"`
+	SchemaVersion int                      `json:"schema_version,omitempty"`
+	Execution     workflow.ExecutionPolicy `json:"execution"`
+	Project       string                   `json:"project"`
+	Repo          Repo                     `json:"repo"`
+	OpenRouter    OpenRouter               `json:"openrouter"`
+	Orchestrator  Orchestrator             `json:"orchestrator"`
+	// Models is the operator's model catalog, by role category.
+	Models map[string]ModelCategory `json:"models,omitempty"`
+	Agents map[string]Agent         `json:"agents"`
 
 	path string
 }
 
-// Fixed team roles. The flow depends on these identifiers. The values
-// match the (unchanged, Spanish) prompt filenames and config keys they
-// map to, so they are intentionally not translated.
-const (
-	RoleArchitect = "arquitecto-bd"
-	RoleEngineer  = "ingeniero"
-	RoleDesigner  = "disenador"
-)
+// FileName is the workspace configuration file.
+const FileName = "yanai.config.json"
 
-// ValidRoles lists the identifiers the flow recognizes.
-var ValidRoles = []string{RoleArchitect, RoleEngineer, RoleDesigner}
+// Reserved IDs belong to the harness and can never name a worker.
+var reserved = map[string]bool{"parent": true, "engine": true, "human": true}
+
+var workerID = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
+
+// ValidWorkerID reports whether id can name a worker: lowercase letters,
+// digits and hyphens, starting with a letter, at most 64 characters, and not
+// reserved for the harness.
+func ValidWorkerID(id string) error {
+	if !workerID.MatchString(id) || reserved[id] {
+		return fmt.Errorf("invalid worker id %q: use lowercase letters, digits and hyphens, start with a letter, at most 64 characters; parent, engine and human are reserved", id)
+	}
+	return nil
+}
 
 // Load reads the config from the workspace and applies default values.
 func Load(ws string) (*Config, error) {
@@ -80,19 +157,32 @@ func Load(ws string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("workspace: %w", err)
 	}
-	path := filepath.Join(abs, "yanai.config.json")
+	path := filepath.Join(abs, FileName)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("could not read %s (did you run 'yanai init'?): %w", path, err)
 	}
-	var c Config
-	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("%s has invalid JSON: %w", path, err)
+	c, err := Parse(b, abs)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	c.path = path
+	return c, nil
+}
+
+// Parse validates configuration bytes exactly as Load does, relative to the
+// workspace root. It is how a parent's proposed configuration is checked
+// before a human ever sees it, without touching the live file.
+func Parse(data []byte, workspace string) (*Config, error) {
+	var c Config
+	d := json.NewDecoder(bytes.NewReader(data))
+	if err := d.Decode(&c); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	c.path = filepath.Join(workspace, FileName)
 	c.applyDefaults()
 	if c.Repo.Path != "" && !filepath.IsAbs(c.Repo.Path) {
-		c.Repo.Path = filepath.Join(abs, c.Repo.Path)
+		c.Repo.Path = filepath.Join(workspace, c.Repo.Path)
 	}
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -122,6 +212,9 @@ func (c *Config) applyDefaults() {
 	if c.Repo.MaxSelectedFiles == 0 {
 		c.Repo.MaxSelectedFiles = 15
 	}
+	if c.Agents == nil {
+		c.Agents = map[string]Agent{}
+	}
 	for id, a := range c.Agents {
 		if a.ID == "" {
 			a.ID = id
@@ -129,28 +222,162 @@ func (c *Config) applyDefaults() {
 		if a.MaxTokens == 0 {
 			a.MaxTokens = 8000
 		}
+		if a.MaxSteps == 0 {
+			a.MaxSteps = DefaultWorkerSteps
+		}
 		if a.Prompt == "" {
-			a.Prompt = filepath.Join("prompts", id+".md")
+			a.Prompt = filepath.ToSlash(filepath.Join("prompts", id+".md"))
 		}
 		c.Agents[id] = a
 	}
+	if c.Orchestrator.MaxTokens == 0 {
+		c.Orchestrator.MaxTokens = 16000
+	}
+	if c.Orchestrator.MaxSteps == 0 {
+		c.Orchestrator.MaxSteps = DefaultParentSteps
+	}
 }
 
+// Starter step limits: parent turns per planning or closing phase, and worker
+// turns per run.
+const (
+	DefaultParentSteps = 20
+	DefaultWorkerSteps = 100
+)
+
 func (c *Config) validate() error {
-	for _, r := range ValidRoles {
-		a, ok := c.Agents[r]
-		if !ok {
-			return fmt.Errorf("missing agent %q in %s", r, c.path)
+	if c.Orchestrator.MaxTokens < 0 || c.Orchestrator.MaxTokens > 10000000 || c.Orchestrator.MaxSteps < 0 || c.Orchestrator.MaxSteps > 1000 {
+		return fmt.Errorf("orchestrator max_tokens must be between 1 and 10000000 and max_steps between 1 and 1000")
+	}
+	for key, a := range c.Agents {
+		if err := validateAgent(key, a); err != nil {
+			return err
 		}
-		if a.MaxTokens <= 0 || a.MaxTokens > 10000000 {
-			return fmt.Errorf("agent %q max_tokens must be between 1 and 10000000", r)
-		}
-		if a.Model == "" {
-			return fmt.Errorf("agent %q has no 'model' (e.g. anthropic/claude-sonnet-4.5)", r)
+	}
+	for key, category := range c.Models {
+		if err := validateCategory(key, category); err != nil {
+			return err
 		}
 	}
 	return nil
 }
+
+func validateCategory(key string, category ModelCategory) error {
+	if err := ValidWorkerID(key); err != nil {
+		return fmt.Errorf("model category %q: use lowercase letters, digits and hyphens, starting with a letter", key)
+	}
+	if strings.TrimSpace(category.Description) == "" {
+		return fmt.Errorf("model category %q needs a description", key)
+	}
+	if len(category.Options) == 0 || len(category.Options) > MaxModelOptions {
+		return fmt.Errorf("model category %q needs between 1 and %d options", key, MaxModelOptions)
+	}
+	seen := map[string]bool{}
+	covered := map[string]bool{}
+	for _, o := range category.Options {
+		m := o.Model
+		if strings.TrimSpace(m) == "" || m != strings.TrimSpace(m) || seen[m] {
+			return fmt.Errorf("model category %q has a blank or repeated option %q", key, m)
+		}
+		seen[m] = true
+		if strings.TrimSpace(o.Strengths) == "" {
+			return fmt.Errorf("model %s (category %s) needs \"strengths\"", m, key)
+		}
+		if len(o.Difficulty) == 0 {
+			return fmt.Errorf("model %s (category %s) needs \"difficulty\": some of %s", m, key, strings.Join(Difficulties, ", "))
+		}
+		levels := map[string]bool{}
+		for _, d := range o.Difficulty {
+			if !ValidDifficulty(d) || levels[d] {
+				return fmt.Errorf("model %s (category %s) has an invalid or repeated difficulty %q; use %s", m, key, d, strings.Join(Difficulties, ", "))
+			}
+			levels[d] = true
+			covered[d] = true
+		}
+	}
+	for _, d := range Difficulties {
+		if !covered[d] {
+			return fmt.Errorf("model category %q has no option for difficulty %q; together its options must cover %s", key, d, strings.Join(Difficulties, ", "))
+		}
+	}
+	return nil
+}
+
+// Option returns the catalog entry for model within category.
+func (c *Config) Option(category, model string) (ModelOption, bool) {
+	for _, o := range c.Models[category].Options {
+		if o.Model == model {
+			return o, true
+		}
+	}
+	return ModelOption{}, false
+}
+
+// CategoryOf reports whether model is an option of category.
+func (c *Config) CategoryOf(category, model string) bool {
+	_, ok := c.Option(category, model)
+	return ok
+}
+
+func validateAgent(key string, a Agent) error {
+	if err := ValidWorkerID(key); err != nil && !legacyRole(key) {
+		return err
+	}
+	if a.ID != key {
+		return fmt.Errorf("agent %q declares a different id %q", key, a.ID)
+	}
+	if a.MaxTokens <= 0 || a.MaxTokens > 10000000 {
+		return fmt.Errorf("agent %q max_tokens must be between 1 and 10000000", key)
+	}
+	if a.MaxSteps <= 0 || a.MaxSteps > 10000 {
+		return fmt.Errorf("agent %q max_steps must be between 1 and 10000", key)
+	}
+	if strings.TrimSpace(a.Model) == "" {
+		return fmt.Errorf("agent %q has no 'model' (e.g. z-ai/glm-5)", key)
+	}
+	if a.Temperature < 0 || a.Temperature > 2 {
+		return fmt.Errorf("agent %q temperature must be between 0 and 2", key)
+	}
+	p := filepath.ToSlash(filepath.Clean(a.Prompt))
+	if a.Prompt == "" || filepath.IsAbs(a.Prompt) || p == "." || p == ".." || strings.HasPrefix(p, "../") || strings.ContainsAny(a.Prompt, "\\\x00\r\n") {
+		return fmt.Errorf("agent %q prompt must be a workspace-relative path", key)
+	}
+	return nil
+}
+
+// legacyRole keeps historical workspaces readable: their role names carry no
+// special behavior any more, but a config that still lists them must load.
+func legacyRole(id string) bool {
+	return id == "ingeniero" || id == "arquitecto-bd" || id == "disenador"
+}
+
+// ValidateOrchestrator reports whether the parent can make paid calls.
+func (c *Config) ValidateOrchestrator() error {
+	o := c.Orchestrator
+	if strings.TrimSpace(o.Model) == "" {
+		return fmt.Errorf("configure orchestrator.model in %s before planning", FileName)
+	}
+	if err := o.Budget.Validate(); err != nil {
+		return fmt.Errorf("orchestrator.budget: %w", err)
+	}
+	if _, ok := o.Budget.Prices[o.Model]; !ok {
+		return fmt.Errorf("configure orchestrator.budget.prices upper bounds for %s before paid calls", o.Model)
+	}
+	if len(c.Models) == 0 {
+		return fmt.Errorf("configure the \"models\" catalog in %s before planning: the parent chooses the worker's model from it", FileName)
+	}
+	for key, category := range c.Models {
+		for _, o := range category.Options {
+			if _, ok := c.Execution.Prices[o.Model]; !ok {
+				return fmt.Errorf("model %s (category %s) needs an execution.prices upper bound before planning", o.Model, key)
+			}
+		}
+	}
+	return nil
+}
+
+// Path is where this configuration was loaded from.
+func (c *Config) Path() string { return c.path }
 
 // Agent returns the configuration for a role.
 func (c *Config) Agent(role string) (Agent, error) {

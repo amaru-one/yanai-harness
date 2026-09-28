@@ -2,8 +2,9 @@ package templates
 
 // defaultConfig is a public starter configuration. Repository binding is filled
 // by init; operators review the remaining settings before planning work.
+// Agents start empty: the parent proposes the worker for each ticket.
 const defaultConfig = `{
-  "schema_version": 9,
+  "schema_version": 10,
   "project": "Engineering project",
   "repo": {
     "path": "",
@@ -22,6 +23,19 @@ const defaultConfig = `{
     "timeout_seconds": 600,
     "retries": 3
   },
+  "orchestrator": {
+    "model": "",
+    "temperature": 0.2,
+    "max_tokens": 16000,
+    "max_steps": 20,
+    "budget": {
+      "max_tokens": 0,
+      "max_cost_usd": 0,
+      "max_active_seconds": 0,
+      "max_calls": 0,
+      "prices": {}
+    }
+  },
   "execution": {
     "max_tokens": 0,
     "max_cost_usd": 0,
@@ -36,28 +50,47 @@ const defaultConfig = `{
     "destructive_db": false,
     "tools": {}
   },
-  "agents": {
-    "arquitecto-bd": {
-      "name": "Arquitecto de BD",
-      "model": "google/gemini-2.5-pro",
-      "temperature": 0.2,
-      "max_tokens": 16000,
-      "prompt": "prompts/arquitecto-bd.md"
-    },
-    "ingeniero": {
-      "name": "Software Engineer",
-      "model": "qwen/qwen3-coder-plus",
-      "temperature": 0.2,
-      "max_tokens": 16000,
-      "prompt": "prompts/ingeniero.md"
-    },
-    "disenador": {
-      "name": "Diseñador UI/UX (revisión)",
-      "model": "openai/gpt-5.1",
-      "temperature": 0.5,
-      "max_tokens": 16000,
-      "prompt": "prompts/disenador.md"
-    }
-  }
+  "models": {},
+  "agents": {}
 }
+`
+
+// alcanceTemplate is the project scope document. It changes rarely.
+const alcanceTemplate = `# Project scope
+
+## Vision and purpose
+
+## Domain and users
+
+## Stack and architecture
+
+## Modules and boundaries
+<!-- directory → responsibility -->
+
+## Conventions
+<!-- style, tests, naming, commits; prompts and Markdown must be in English -->
+
+## Out of scope
+
+## Constraints
+<!-- security, data, compatibility -->
+`
+
+// estadoTemplate is the current project state. The parent proposes an update
+// after every ticket and a human accepts it with 'yanai close'.
+const estadoTemplate = `# Project state
+
+## What exists and works
+<!-- by module -->
+
+## Partially implemented
+
+## Technical debt and known bugs
+
+## Latest resolved tickets
+<!-- ticket, type, branch, commits, summary -->
+
+## Recent decisions
+
+## Open risks
 `
