@@ -6,9 +6,30 @@ import (
 	"testing"
 )
 
+func TestTicketTypeHeadingCompatibility(t *testing.T) {
+	const body = "\nfix\n\n## Task\nFix the parser.\n\n## Acceptance criteria\n- Reject invalid input.\n"
+	for _, heading := range []string{"## Type", "## type", "## Tipo"} {
+		t.Run(heading, func(t *testing.T) {
+			raw := "# Parser fix\n\n" + heading + body
+			ticket, err := ParseMarkdownTicket(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ticket.Type != "fix" || ticket.TicketBranch() != "fix/parser-fix" || ticket.Revision != Digest(raw) {
+				t.Fatalf("heading changed ticket identity: %+v", ticket)
+			}
+		})
+	}
+	for _, headings := range []string{"## Type\nfix\n\n## Tipo", "## Tipo\nfix\n\n## Type"} {
+		if _, err := ParseMarkdownTicket("# Parser fix\n\n" + headings + body); err == nil {
+			t.Fatalf("accepted duplicate type sections: %s", headings)
+		}
+	}
+}
+
 func TestCheckInputsStayOutOfAgentTicket(t *testing.T) {
 	const secret = "postgres://test:private@127.0.0.1:5432/postgres?sslmode=disable"
-	raw := "# Change\n\n## Task\nRun the database check.\n\n## Acceptance criteria\n- The database check runs.\n\n## Check inputs\n- MAWTA_TEST_ADMIN_URL=" + secret + "\n"
+	raw := "# Change\n\n## Type\nfix <!-- type -->\n\n## Task\nRun the database check.\n\n## Acceptance criteria\n- The database check runs.\n\n## Check inputs\n- MAWTA_TEST_ADMIN_URL=" + secret + "\n"
 	ticket, err := ParseMarkdownTicket(raw)
 	if err != nil || len(ticket.CheckInputNames) != 1 || ticket.CheckInputNames[0] != "MAWTA_TEST_ADMIN_URL" {
 		t.Fatalf("ticket names: %+v %v", ticket, err)
@@ -26,7 +47,7 @@ func TestCheckInputsStayOutOfAgentTicket(t *testing.T) {
 		t.Fatalf("redaction: %s %v", redacted, err)
 	}
 	for _, line := range []string{"- PATH=/tmp", "- MAWTA_TEST_ADMIN_URL=", "- MAWTA_TEST_ADMIN_URL=second\n- MAWTA_TEST_ADMIN_URL=third"} {
-		bad := "# Change\n\n## Task\nRun.\n\n## Acceptance criteria\n- Run.\n\n## Check inputs\n" + line + "\n"
+		bad := "# Change\n\n## Type\nfix <!-- type -->\n\n## Task\nRun.\n\n## Acceptance criteria\n- Run.\n\n## Check inputs\n" + line + "\n"
 		if _, err := ParseMarkdownTicket(bad); err == nil {
 			t.Fatalf("accepted unsafe check input %q", line)
 		}
@@ -34,7 +55,7 @@ func TestCheckInputsStayOutOfAgentTicket(t *testing.T) {
 }
 
 func TestMarkdownInputAndObservationApproval(t *testing.T) {
-	good := "# Change\n\n## Task\nFix the parser.\n\n## Acceptance criteria\n- Reject invalid input.\n\n## Constraints\nKeep the API.\n"
+	good := "# Change\n\n## Type\nfix <!-- type -->\n\n## Task\nFix the parser.\n\n## Acceptance criteria\n- Reject invalid input.\n\n## Constraints\nKeep the API.\n"
 	parsed, err := ParseMarkdownTicket(good)
 	if err != nil || parsed.Criteria[0].ID != "AC-001" || parsed.Revision != Digest(good) {
 		t.Fatalf("ticket: %+v %v", parsed, err)

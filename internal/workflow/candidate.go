@@ -177,8 +177,8 @@ func DecodeCandidate(raw string, t Ticket) (Candidate, error) {
 // They are constants because both the renderer and every reader of a rendered
 // request — a mock provider, a test provider — must agree on them exactly.
 const (
-	TicketHeading          = "# Tu tarea: "
-	DeclaredOutputsHeading = "# Salidas declaradas (responde exactamente estas rutas, una entrada por cada una)"
+	TicketHeading          = "# Your task: "
+	DeclaredOutputsHeading = "# Declared outputs (answer exactly these paths, one entry per path)"
 )
 
 // RenderDeclaredOutputs writes the checklist a candidate must answer.
@@ -195,6 +195,9 @@ func RenderDeclaredOutputs(outputs []string) string {
 // execution request. It exists so a mock or a test provider answers the
 // request it was actually given rather than a hardcoded guess about it.
 func DeclaredOutputs(message string) (ticket string, outputs []string) {
+	// Read persisted requests from before the English prompt format as well.
+	message = strings.Replace(message, "# Tu tarea: ", TicketHeading, 1)
+	message = strings.Replace(message, "# Salidas declaradas (responde exactamente estas rutas, una entrada por cada una)", DeclaredOutputsHeading, 1)
 	for _, line := range strings.Split(message, "\n") {
 		if strings.HasPrefix(line, TicketHeading) {
 			ticket = strings.TrimSpace(strings.TrimPrefix(line, TicketHeading))

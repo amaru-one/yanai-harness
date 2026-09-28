@@ -37,6 +37,7 @@ const (
 	PhaseRejected          = "rejected"
 	PhaseAwaitingExecution = "awaiting_execution"
 	PhaseAwaitingReview    = "awaiting_review"
+	PhaseCompleted         = "completed"
 )
 
 // Task is an assignment to a team member. Status
@@ -87,7 +88,148 @@ type State struct {
 	Updated       time.Time                `json:"updated"`
 	Tasks         []Task                   `json:"tasks"`
 	History       []Event                  `json:"history"`
-	StateVersion  int64                    `json:"-"`
+	// Orchestration holds the level 0 parent-led cycle's durable references.
+	Orchestration *OrchestrationState `json:"orchestration,omitempty"`
+	StateVersion  int64               `json:"-"`
+}
+
+// OrchestrationState records what a parent-led cycle captured and produced.
+// Large bodies live in artifacts; this keeps only their references.
+type OrchestrationState struct {
+	Protocol string `json:"protocol"`
+	// ParentSettings is the orchestrator configuration captured when the
+	// cycle started. The parent always runs under exactly these settings.
+	ParentSettings   json.RawMessage            `json:"parent_settings"`
+	ConfigOriginal   workflow.ArtifactRef       `json:"config_original"`
+	InputHashes      map[string]string          `json:"input_hashes"`
+	RepoBaseline     string                     `json:"repo_baseline"`
+	RepoRoot         string                     `json:"repo_root"`
+	Proposal         string                     `json:"proposal,omitempty"`
+	ProposalInput    string                     `json:"proposal_input,omitempty"`
+	Worker           string                     `json:"worker,omitempty"`
+	TicketBranch     string                     `json:"ticket_branch,omitempty"`
+	CommitScope      string                     `json:"commit_scope,omitempty"`
+	CommitModule     string                     `json:"commit_module,omitempty"`
+	BasePrompt       string                     `json:"base_prompt,omitempty"`
+	ModelReason      string                     `json:"model_reason,omitempty"`
+	TaskComplexity   string                     `json:"task_complexity,omitempty"`
+	ComplexityReason string                     `json:"complexity_reason,omitempty"`
+	Summary          string                     `json:"summary,omitempty"`
+	ConfigProposed   *workflow.ArtifactRef      `json:"config_proposed,omitempty"`
+	Prompt           *workflow.ArtifactRef      `json:"prompt,omitempty"`
+	Report           *workflow.ArtifactRef      `json:"report,omitempty"`
+	StateUpdate      string                     `json:"state_update,omitempty"`
+	Outcome          string                     `json:"outcome,omitempty"`
+	Explanation      string                     `json:"explanation,omitempty"`
+	Commits          []workflow.GitCommitRecord `json:"commits,omitempty"`
+}
+
+// Project documents and prompt directories of a level 0 workspace.
+const (
+	AlcancePath         = "project/alcance.md"
+	EstadoPath          = "project/estado.md"
+	BasePromptsDir      = "prompts/base"
+	GeneratedPromptsDir = "prompts/generated"
+)
+
+// Document is a workspace file with its content hash.
+type Document struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	SHA256  string `json:"sha256"`
+}
+
+// ProjectDocuments reads alcance.md and estado.md. Both must exist and hold
+// more than headings, whitespace and comments: the parent cannot plan against
+// a template.
+func (w *Workspace) ProjectDocuments() ([]Document, error) {
+	var out []Document
+	for _, rel := range []string{AlcancePath, EstadoPath} {
+		d, err := w.ReadWorkspaceFile(rel)
+		if err != nil {
+			return nil, fmt.Errorf("%s is missing; run 'yanai init' and describe the project there before planning: %w", rel, err)
+		}
+		if !MeaningfulMarkdown(d.Content) {
+			return nil, fmt.Errorf("%s only contains headings or comments; describe the project there before planning", rel)
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// ReadWorkspaceFile reads a regular workspace file without following symlinks.
+func (w *Workspace) ReadWorkspaceFile(rel string) (Document, error) {
+	safe, err := workflow.SafeRelativePath(w.Root, rel)
+	if err != nil {
+		return Document{}, err
+	}
+	path := filepath.Join(w.Root, filepath.FromSlash(safe))
+	info, err := os.Lstat(path)
+	if err != nil {
+		return Document{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return Document{}, fmt.Errorf("%s is not a regular file", rel)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Document{}, err
+	}
+	return Document{Path: safe, Content: string(data), SHA256: workflow.Digest(string(data))}, nil
+}
+
+// BasePrompts lists the optional operator base prompts. An empty or missing
+// directory is valid.
+func (w *Workspace) BasePrompts() ([]Document, error) {
+	entries, err := os.ReadDir(w.path(filepath.FromSlash(BasePromptsDir)))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []Document
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		d, err := w.ReadWorkspaceFile(BasePromptsDir + "/" + e.Name())
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+// GeneratedPromptPath is where a ticket's worker prompt lives.
+func GeneratedPromptPath(slug, role string) string {
+	return GeneratedPromptsDir + "/" + slug + "/" + role + ".md"
+}
+
+// MeaningfulMarkdown reports whether text has content beyond headings,
+// whitespace and HTML comments.
+func MeaningfulMarkdown(text string) bool {
+	for {
+		start := strings.Index(text, "<!--")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(text[start:], "-->")
+		if end < 0 {
+			text = text[:start]
+			break
+		}
+		text = text[:start] + text[start+end+3:]
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			return true
+		}
+	}
+	return false
 }
 
 // ApprovalBinding records the exact inputs a human approved. A plan or scope

@@ -327,3 +327,62 @@ func (t *Target) CheckDirectory(path string) error {
 	}
 	return t.CheckPath(path)
 }
+
+// GitCommand runs a Git command for the controlled Git service. Inherited
+// GIT_* variables are dropped as for every other repository call; extra
+// supplies the exact variables the operation needs (a temporary index, the
+// recorded author identity and timestamps). Repository hooks never run: a
+// hook is unreviewed code, not part of the approved tool path.
+func (t *Target) GitCommand(extra []string, stdin string, args ...string) (string, error) {
+	full := append([]string{"-C", t.Root, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "-c", "advice.detachedHead=false"}, args...)
+	cmd := exec.Command("git", full...)
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(env, "GIT_") {
+			cmd.Env = append(cmd.Env, env)
+		}
+	}
+	cmd.Env = append(cmd.Env, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(cmd.Env, extra...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return string(out), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return string(out), nil
+}
+
+// BranchTip returns the commit a local branch points to, or "" when the
+// branch does not exist.
+func (t *Target) BranchTip(branch string) (string, error) {
+	out, err := t.git("rev-parse", "--verify", "--quiet", "refs/heads/"+branch+"^{commit}")
+	if err != nil {
+		if e, ok := err.(*exec.ExitError); ok && e.ExitCode() == 1 {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// ValidBranchName asks Git whether name is a valid branch name.
+func (t *Target) ValidBranchName(name string) error {
+	if _, err := t.git("check-ref-format", "--branch", name); err != nil {
+		return fmt.Errorf("invalid branch name %q", name)
+	}
+	return nil
+}
+
+// Identity returns the configured Git author identity of the checkout.
+func (t *Target) Identity() (name, email string, err error) {
+	n, _ := t.git("config", "--get", "user.name")
+	e, _ := t.git("config", "--get", "user.email")
+	name, email = strings.TrimSpace(n), strings.TrimSpace(e)
+	if name == "" || email == "" {
+		return "", "", fmt.Errorf("configure git user.name and user.email for %s before running: commits need an explicit author identity", t.Root)
+	}
+	return name, email, nil
+}

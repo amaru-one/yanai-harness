@@ -52,11 +52,48 @@ type ExecutionPolicy struct {
 	Prices           map[string]ModelPrice `json:"prices"`
 	Checks           []Check               `json:"checks"`
 	Tools            map[string]CheckTool  `json:"tools,omitempty"`
-	// These permissions are deliberately unavailable until a controlled executor exists.
+	// Commit permits Conventional Commits on the cycle's own ticket branch
+	// only, through the controlled Git service. Merge, deploy and destructive
+	// database operations remain unavailable.
 	Commit        bool `json:"commit"`
 	Merge         bool `json:"merge"`
 	Deploy        bool `json:"deploy"`
 	DestructiveDB bool `json:"destructive_db"`
+}
+
+// PlanningBudget bounds the parent agent's spending for one cycle. It is a
+// separate bucket from the worker's ExecutionPolicy; both are reported and
+// neither is ever reset by a policy change or a restart.
+type PlanningBudget struct {
+	MaxTokens        int64                 `json:"max_tokens"`
+	MaxCostUSD       float64               `json:"max_cost_usd"`
+	MaxActiveSeconds int64                 `json:"max_active_seconds"`
+	MaxCalls         int                   `json:"max_calls"`
+	Prices           map[string]ModelPrice `json:"prices"`
+}
+
+func (p PlanningBudget) Validate() error {
+	if p.MaxTokens <= 0 || p.MaxTokens > 1e12 || !finite(p.MaxCostUSD) || p.MaxCostUSD <= 0 || p.MaxActiveSeconds <= 0 || p.MaxActiveSeconds > 31536000 || p.MaxCalls <= 0 {
+		return fmt.Errorf("finite positive max_tokens, max_cost_usd, max_active_seconds and max_calls are required")
+	}
+	for model, price := range p.Prices {
+		if model == "" || !finite(price.Input) || !finite(price.Output) {
+			return fmt.Errorf("invalid model price bound")
+		}
+	}
+	return nil
+}
+
+// Policy expresses the planning budget in the shape the shared budget ledger
+// stores; the fields a parent cannot use are zero.
+func (p PlanningBudget) Policy() ExecutionPolicy {
+	return ExecutionPolicy{MaxTokens: p.MaxTokens, MaxCostUSD: p.MaxCostUSD, MaxActiveSeconds: p.MaxActiveSeconds, MaxCalls: p.MaxCalls, Prices: p.Prices}
+}
+
+// Exceeds reports whether any limit of p is higher than the matching limit of
+// other; a parent may lower its future budget but never raise it.
+func (p PlanningBudget) Exceeds(other PlanningBudget) bool {
+	return p.MaxTokens > other.MaxTokens || p.MaxCostUSD > other.MaxCostUSD || p.MaxActiveSeconds > other.MaxActiveSeconds || p.MaxCalls > other.MaxCalls
 }
 
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 }
@@ -64,8 +101,8 @@ func (p ExecutionPolicy) Validate() error {
 	if p.MaxTokens <= 0 || p.MaxTokens > 1e12 || !finite(p.MaxCostUSD) || p.MaxCostUSD <= 0 || p.MaxActiveSeconds <= 0 || p.MaxActiveSeconds > 31536000 || p.MaxCalls <= 0 || p.MaxRepairs < 0 {
 		return fmt.Errorf("configure execution: finite positive max_tokens, max_cost_usd, max_active_seconds, max_calls and nonnegative max_repairs are required")
 	}
-	if p.Commit || p.Merge || p.Deploy || p.DestructiveDB {
-		return fmt.Errorf("commit, merge, deploy and destructive_db are not supported by this executor")
+	if p.Merge || p.Deploy || p.DestructiveDB {
+		return fmt.Errorf("merge, deploy and destructive_db are not supported by this executor")
 	}
 	for model, price := range p.Prices {
 		if model == "" || !finite(price.Input) || !finite(price.Output) {

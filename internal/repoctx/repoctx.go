@@ -93,11 +93,11 @@ func Index(r config.Repo) (string, error) {
 	sort.Strings(paths)
 	var b strings.Builder
 	b.WriteString(snapshot.Label())
-	b.WriteString("\n## Estructura del repositorio\n\n```\n")
+	b.WriteString("\n## Repository structure\n\n```\n")
 	for _, path := range paths {
 		fmt.Fprintln(&b, path)
 	}
-	b.WriteString("```\n\n## Instrucciones y SPEC.md\n\n")
+	b.WriteString("```\n\n## Instructions and SPEC.md\n\n")
 	for _, path := range paths {
 		if filepath.Base(path) != "SPEC.md" && path != "AGENTS.md" {
 			continue
@@ -160,7 +160,7 @@ func Files(r config.Repo, paths []string) (string, error) {
 		}
 		fmt.Fprintf(&b, "\n### %s\n\n```%s\n%s\n```\n", path, language(path), data)
 		if truncated {
-			b.WriteString("_(archivo recortado por tamaño)_\n")
+			b.WriteString("_(file truncated to fit the size limit)_\n")
 		}
 		total += len(data)
 	}

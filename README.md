@@ -1,12 +1,17 @@
 # yanai-harness
 
-A Go CLI for engineer-led development cycles over OpenRouter. Supply an
-already-decided Markdown ticket; the engineer plans and implements it, consulting
-the DB architect and designer only when needed. Every observation pauses for a
-human response. Repository writes always require human approval.
+A Go CLI for parent-led development cycles over OpenRouter (level 0). Supply an
+already-decided Markdown ticket; a **parent agent** reads the project scope and
+state, the ticket and the repository, and creates **exactly one worker** with a
+generated role prompt, one task that covers every acceptance criterion, and the
+complete configuration it will run under. A human reviews and approves that
+proposal once. The worker then reads files, edits only the files it owns, runs
+the approved checks, and makes Conventional Commits on a ticket branch
+(`<type>/<slug>`) **in the configured checkout itself** — no clones, worktrees or
+sandboxes. The checkout returns to its original branch, and the parent proposes
+an update to `project/estado.md` that the human accepts with `yanai close`.
 
-The engineer, DB architect, and designer's local Markdown prompts are
-operator-owned and are never replaced during initialization or upgrade.
+Every observation pauses for a human response. Nothing merges, pushes or deploys.
 
 ## Start a project
 
@@ -27,7 +32,7 @@ secrets, symlink escapes, and ignored files remain protected. The configured
 allowed paths enforce the project boundary. Fingerprints cover safe repository files independently of narrowed
 context filters, plus the whole Git status and index.
 
-Review `yanai.config.json`: the three model choices and prompt paths, allowed paths,
+Review `yanai.config.json`: the orchestrator model and budget, allowed paths,
 finite execution budgets, price bounds, and required checks. Budgets default to
 zero deliberately: configure them before paid calls. Existing custom configuration
 is preserved; rebinding does not silently widen an existing allowlist.
@@ -80,9 +85,9 @@ adapter supports validated `go test`, `go vet`, and `go build` with external cac
 The tool name `go` is reserved for this compatibility adapter. A project without
 Go checks does not need a Go toolchain at runtime.
 
-Language/framework requirements belong in the operator's Markdown prompts under
-`templates/`; the harness does not rewrite the engineer, DB architect, or designer
-prompts. New configurations leave `repo.extensions` empty (no language filter);
+Language/framework requirements belong in `project/alcance.md` and the optional
+base prompts under `prompts/base/`; the parent carries them into the worker prompt
+it generates. New configurations leave `repo.extensions` empty (no language filter);
 set explicit extensions to narrow context for a project. Repository protections
 and context byte limits still apply.
 
@@ -96,51 +101,141 @@ execution. This static preflight does not prove a test suite can run; a runtime
 dependency failure remains a failed check requiring diagnosis. Skipped tests do
 not establish acceptance.
 
+## Project documents and prompts
+
+Write all prompts and Markdown documents in English, including generated worker
+prompts, proposals, reports, and state updates. Keep existing file paths and schema
+values unchanged for compatibility.
+
+`yanai init` creates `project/alcance.md` (project scope) and `project/estado.md`
+(current state). Planning refuses to start while either holds only headings or
+comments. Optional base prompts go in `prompts/base/*.md`; the parent adapts one
+or writes the worker prompt from scratch into `prompts/generated/<slug>/<worker>.md`.
+
+Configure `orchestrator` in `yanai.config.json` (model, max tokens, max steps and a
+separate finite budget with price bounds). The parent runs with the settings
+captured when its cycle starts; its proposal can change any configuration, shown
+as a full diff at review, but cannot raise its own budget. `agents` starts empty.
+
+The worker's model comes from the operator's `models` catalog. Each category (for
+example `engineering`, `database`) has a description and 1–5 options; each
+option names a model with an `execution.prices` bound, the task difficulties it
+handles (`baja`, `media`, `alta`), its `strengths` and, optionally, its
+`weaknesses` and `benchmarks` (figure plus source). Together a category's options
+must cover all three difficulties.
+
+The parent follows a fixed method: understand the project, analyze the ticket
+(reading the files it will touch), define the work, rate the difficulty, then choose
+the model. The difficulty rubric:
+
+- `baja` (low): 1–3 files in one module, an existing pattern to follow, no schema, public
+  API, concurrency or security change.
+- `media` (medium): several files or two modules, moderate new logic, new tests.
+- `alta` (high): crosses modules; touches schema, migrations, contracts, concurrency,
+  security or sensitive data; ambiguous design or non-trivial algorithms. When in
+  doubt, the higher level.
+
+The parent declares `task_complexity` and `complexity_reason`, a `model_category`,
+and a model of that category that covers the difficulty. It should pick the cheapest
+such option unless a declared weakness matters for this ticket, and must explain in
+`model_reason` why it discarded every other option. It reasons only from the
+catalog, never from benchmark figures it remembers, and cannot change the catalog.
+Go rejects a model that does not cover the declared difficulty. Review shows the
+difficulty, every option with its price and coverage, and the reason, and warns
+when a cheaper option also covered the level. All of it is bound by the approval.
+
+Example (figures as published by September 2026; vendor-reported unless noted):
+
+```json
+"models": {
+  "engineering": {
+    "description": "Go/Svelte code, tests, refactoring",
+    "options": [
+      {"model": "deepseek/deepseek-v4-pro", "difficulty": ["baja", "media", "alta"],
+       "strengths": "reasoning and code; long agent tasks; 1M-token context",
+       "weaknesses": "vendor figures only, no independent evaluation",
+       "benchmarks": "SWE-bench Verified 80.6%, LiveCodeBench 93.5%, Terminal-Bench 2.0 67.9% (DeepSeek, 2026-04)"},
+      {"model": "z-ai/glm-4.6", "difficulty": ["baja", "media"],
+       "strengths": "code and tool use; good value for the price",
+       "weaknesses": "2025 model; 200K-token context",
+       "benchmarks": "SWE-bench Verified 68.0% (Vals AI, independent); LiveCodeBench v6 82.8% (Z.ai)"},
+      {"model": "qwen/qwen3-coder-plus", "difficulty": ["baja", "media"],
+       "strengths": "coding agent with tool calling; 1M-token context",
+       "weaknesses": "expensive output; no figures specific to the Plus version",
+       "benchmarks": "SWE-bench Verified 69.6% for the open Qwen3-Coder-480B model (Qwen, 2025-07)"},
+      {"model": "moonshotai/kimi-k2.7-code", "difficulty": ["baja", "media"],
+       "strengths": "end-to-end programming tasks in long contexts (256K); 30% fewer reasoning tokens than K2.6",
+       "weaknesses": "expensive output; vendor figures only",
+       "benchmarks": "SWE-bench Verified 60.4% (Moonshot, 2026-06)"}
+    ]
+  }
+}
+```
+
+Matching `execution.prices` (USD per million tokens, OpenRouter, 2026-09):
+
+```json
+"deepseek/deepseek-v4-pro":  {"input_usd_per_million": 0.348, "output_usd_per_million": 0.696},
+"z-ai/glm-4.6":              {"input_usd_per_million": 0.43,  "output_usd_per_million": 1.75},
+"qwen/qwen3-coder-plus":     {"input_usd_per_million": 0.65,  "output_usd_per_million": 3.25},
+"moonshotai/kimi-k2.7-code": {"input_usd_per_million": 0.656, "output_usd_per_million": 3.30}
+```
+
 ## Ticket cycle
 
-Use [the small Markdown template](docs/ticket-template.md): one `# Title`, a
-`## Task` section, `## Acceptance criteria` containing `- ` bullets, and optional
-`## Constraints`, and optional `## Check inputs` with `- NAME=value` lines.
-Only names reach agents; keep the workspace and private ticket access restricted.
+Tickets need a `## Type` section with a Conventional Commits type
+(`feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, `chore`, `style`);
+see [the template](docs/ticket-template.md). The title's slug names the branch.
 
 ```sh
 export OPENROUTER_API_KEY=...
-./yanai plan --ws /path/to/workspace task.md
-./yanai status --ws /path/to/workspace
-# For every observation, record your response:
-./yanai resolve --ws /path/to/workspace --observation O-ID --note 'Your decision'
-# Resume the same ticket after responding:
-./yanai plan --ws /path/to/workspace task.md
-./yanai review --ws /path/to/workspace
+./yanai plan --ws /path/to/workspace task.md      # parent proposes one worker
+./yanai resolve --ws ... --observation O-ID --note 'Your decision'   # if paused
+./yanai review --ws /path/to/workspace            # worker, prompt, task, config diff
 ./yanai approve --ws /path/to/workspace --contract REVIEW_TOKEN
-./yanai run --ws /path/to/workspace
+./yanai run --ws /path/to/workspace               # worker loop on <type>/<slug>, then closing
+./yanai review --ws /path/to/workspace            # final report + proposed estado.md diff
+./yanai close --ws /path/to/workspace --state-update HASH
 ```
 
-An observation is always a pause, including advisory concerns. Resolving it is not
-approval. If requirements change, revise the ticket and generate a new plan; revoke
-an existing approval with `invalidate --note ...` first. Confirmed changes are never
-automatically discarded. New execution requires a clean approved baseline.
+Approval activates the proposed configuration (recoverably) and authorizes the
+worker to create the ticket branch from the approved base, write its owned files,
+run approved checks, and commit — only after its required checks pass against the
+current files, with messages `<type>(<scope>): <summary>` plus `Yanai-Ticket` and
+`Yanai-Agent` trailers. Every model answer, tool intent and result, and every Git
+operation is journaled, so `run` resumes after an interruption without repeating
+a paid call, a write or a commit. External edits, a moved branch or a changed
+approved input stop the run without resetting anything.
 
-Execution observations leave confirmed changes and evidence intact. Resolve them,
-then run `review` and `approve` again before `run`. Supplemental approval authorizes
-responses under the same task contract, not changes to its scope or patch baseline.
+The worker ends with `completed` (commits exist, nothing uncommitted, all approved
+checks pass against the final committed state), `no_change`, or `blocked` with
+observations; after human responses, `review`/`approve` confirm them under the same
+contract and `run` continues on the same branch.
 
-The final state is `awaiting_review`: real changes and machine-recorded checks are
-available for human inspection. Independent technical review is not implemented.
-No command commits, merges, deploys, or authorizes destructive database operations.
+Agents read files in batches: `read_file` takes up to 10 paths per call, because
+every turn resends the whole conversation. Before each model call the harness
+estimates the input from the provider's native token count for the previous turn
+(as OpenRouter reports it) plus a byte bound on what was added since; once a
+budget bucket has used more than 80% of its `max_tokens`, it first sends the same
+request capped at one output token (a paid probe, recorded as its own attempt) to
+get the exact prompt count. When the remaining budget or steps cannot cover this
+turn and one more, the turn is the final one: the model is offered only its
+terminal tool (`submit_proposal`, `submit_state_update` or `finish`), so a run ends
+with a proposal, a state update or a `blocked` result instead of stalling. If that
+final answer is invalid, the run stops with its work preserved. Size budgets
+generously so the probe stays rare.
 
 `status --json` includes observations; `status --attempts` reports unresolved
 provider outcomes. Unknown billing/dispatch requires explicit reconciliation and,
-where indicated, `--retry-unresolved`. Recorded planning responses are reused after
-restart. `YANAI_MOCK=1` supplies synthetic responses; it is not evidence of model
-quality. Existing local prompts may contain project-specific assumptions: agents
-must raise conflicts rather than rewrite those files.
+where indicated, `--retry-unresolved`. `YANAI_MOCK=1` supplies synthetic tool calls;
+it is not evidence of model quality.
 
 ## Compatibility and verification
 
-The [work plan](docs/work-plan.md) defines the current ticket workflow. A workspace
-must use the current store schema and contract revision; unsupported workspace
-formats are rejected.
+Workspaces migrate to store schema 6 on first use. Migration is refused while a
+previous binary's patch is unfinished; reconcile it with that binary first. Cycles
+approved under contract revision 3 stay readable but cannot run: invalidate them
+and plan again.
 The target repository is not needed to inspect local status and recorded history.
 
 ```sh

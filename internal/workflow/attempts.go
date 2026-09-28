@@ -262,3 +262,14 @@ func (s *Store) UnreconciledAttempts() ([]Attempt, error) {
 	}
 	return result, nil
 }
+
+// LastTurnUsage returns the provider's native token counts for the most
+// recent settled model turn that role charged to bucket in cycle.
+func (s *Store) LastTurnUsage(cycle int, bucket, role string) (prompt, completion int, ok bool, err error) {
+	err = s.db.QueryRow(`SELECT prompt_tokens, completion_tokens FROM workflow_attempts WHERE project=? AND cycle=? AND bucket=? AND role=? AND kind='agent_turn' AND state=? AND usage_known=1 ORDER BY rowid DESC LIMIT 1`,
+		s.project, cycle, bucketName(bucket), role, AttemptCompleted).Scan(&prompt, &completion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, false, nil
+	}
+	return prompt, completion, err == nil, err
+}

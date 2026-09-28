@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+
+	"github.com/yanai/yanai-harness/internal/workflow"
 )
 
 func cmdReview(args []string) error {
@@ -40,6 +42,9 @@ func cmdPolicy(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *note != "" && st.Orchestration != nil {
+		return fmt.Errorf("level 0 budgets are part of the approved configuration; to change them, invalidate the cycle and plan again")
+	}
 	if *note != "" {
 		if err = r.Workspace.Store.RevisePolicy(st.Cycle, r.Cfg.Execution, *note); err != nil {
 			return err
@@ -52,12 +57,15 @@ func cmdPolicy(args []string) error {
 			return err
 		}
 	}
-	b, err := r.Workspace.Store.Budget(st.Cycle)
-	if err != nil {
-		return err
+	for _, bucket := range []string{workflow.BucketParent, workflow.BucketWorker} {
+		b, err := r.Workspace.Store.BucketBudget(st.Cycle, bucket)
+		if err != nil {
+			fmt.Printf("%s: no budget recorded yet\n", bucket)
+			continue
+		}
+		data, _ := json.MarshalIndent(b, "", "  ")
+		fmt.Printf("%s:\n%s\n", bucket, data)
 	}
-	data, _ := json.MarshalIndent(b, "", "  ")
-	fmt.Println(string(data))
 	return nil
 }
 func cmdInvalidate(args []string) error {

@@ -24,40 +24,97 @@ type Budget struct {
 	RemainingActiveMS int64           `json:"remaining_active_ms"`
 }
 
+// Budget buckets. The worker spends from the execution policy a human
+// approved; the parent spends from the planning budget captured when its
+// cycle started. They are recorded separately and reported together.
+const (
+	BucketWorker = "worker"
+	BucketParent = "parent"
+)
+
+func budgetTable(bucket string) (string, error) {
+	switch bucket {
+	case BucketWorker, "":
+		return "workflow_budgets", nil
+	case BucketParent:
+		return "workflow_parent_budgets", nil
+	}
+	return "", fmt.Errorf("unknown budget bucket %q", bucket)
+}
+
+func bucketName(bucket string) string {
+	if bucket == "" {
+		return BucketWorker
+	}
+	return bucket
+}
+
 func (s *Store) EnsureBudget(cycle int, p ExecutionPolicy) error {
+	return s.EnsureBucket(cycle, BucketWorker, p)
+}
+
+// EnsureParentBudget records the parent's captured planning budget. It is
+// created once per cycle and never changes afterwards.
+func (s *Store) EnsureParentBudget(cycle int, p PlanningBudget) error {
 	if err := p.Validate(); err != nil {
+		return err
+	}
+	return s.ensureBucket(cycle, BucketParent, p.Policy())
+}
+
+func (s *Store) EnsureBucket(cycle int, bucket string, p ExecutionPolicy) error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	return s.ensureBucket(cycle, bucket, p)
+}
+
+func (s *Store) ensureBucket(cycle int, bucket string, p ExecutionPolicy) error {
+	table, err := budgetTable(bucket)
+	if err != nil {
 		return err
 	}
 	if _, err := s.GetCycle(cycle); err != nil {
 		return err
 	}
 	raw, _ := json.Marshal(p)
-	var err error
-	_, err = s.db.Exec(`INSERT INTO workflow_budgets(project,cycle,policy,tokens,cost,calls) SELECT ?,?,?,COALESCE(SUM(reserved_tokens),0),COALESCE(SUM(reserved_cost),0),COUNT(*) FROM workflow_attempts WHERE project=? AND cycle=? ON CONFLICT DO NOTHING`, s.project, cycle, string(raw), s.project, cycle)
+	_, err = s.db.Exec(fmt.Sprintf(`INSERT INTO %s(project,cycle,policy,tokens,cost,calls) SELECT ?,?,?,COALESCE(SUM(reserved_tokens),0),COALESCE(SUM(reserved_cost),0),COUNT(*) FROM workflow_attempts WHERE project=? AND cycle=? AND bucket=? ON CONFLICT DO NOTHING`, table), s.project, cycle, string(raw), s.project, cycle, bucketName(bucket))
 	if err != nil {
 		return err
 	}
-	b, err := s.Budget(cycle)
+	b, err := s.BucketBudget(cycle, bucket)
 	if err != nil {
 		return err
 	}
 	old, _ := json.Marshal(b.Policy)
 	if string(old) != string(raw) {
+		if bucket == BucketParent {
+			return fmt.Errorf("the parent budget captured for this cycle differs from the one in use; parent settings apply from the next cycle")
+		}
 		return fmt.Errorf("execution policy changed; use yanai policy --note to revise it explicitly (spending is preserved)")
 	}
 	return nil
 }
-func (s *Store) Budget(cycle int) (Budget, error) {
+func (s *Store) Budget(cycle int) (Budget, error) { return s.BucketBudget(cycle, BucketWorker) }
+
+// ParentBudget reports the parent's planning and closing spending.
+func (s *Store) ParentBudget(cycle int) (Budget, error) { return s.BucketBudget(cycle, BucketParent) }
+
+func (s *Store) BucketBudget(cycle int, bucket string) (Budget, error) {
 	var b Budget
 	var raw string
-	err := s.db.QueryRow(`SELECT policy,tokens,cost,calls,repairs,active_ms FROM workflow_budgets WHERE project=? AND cycle=?`, s.project, cycle).Scan(&raw, &b.Tokens, &b.Cost, &b.Calls, &b.Repairs, &b.ActiveMS)
+	table, err := budgetTable(bucket)
+	if err != nil {
+		return b, err
+	}
+	err = s.db.QueryRow(fmt.Sprintf(`SELECT policy,tokens,cost,calls,repairs,active_ms FROM %s WHERE project=? AND cycle=?`, table), s.project, cycle).Scan(&raw, &b.Tokens, &b.Cost, &b.Calls, &b.Repairs, &b.ActiveMS)
 	if err != nil {
 		return b, err
 	}
 	if err = json.Unmarshal([]byte(raw), &b.Policy); err != nil {
 		return b, err
 	}
-	err = s.db.QueryRow(`SELECT count(*) FROM workflow_attempts WHERE project=? AND cycle=? AND (cost_known=0 OR usage_known=0 OR state='unknown')`, s.project, cycle).Scan(&b.Unknown)
+	err = s.db.QueryRow(`SELECT count(*) FROM workflow_attempts WHERE project=? AND cycle=? AND bucket=? AND (cost_known=0 OR usage_known=0 OR state='unknown')`, s.project, cycle, bucketName(bucket)).Scan(&b.Unknown)
 	b.RemainingTokens = max(0, b.Policy.MaxTokens-b.Tokens)
 	b.RemainingCostUSD = max(0, b.Policy.MaxCostUSD-b.Cost)
 	b.RemainingCalls = max(0, b.Policy.MaxCalls-b.Calls)
@@ -102,6 +159,7 @@ func (s *Store) RevisePolicy(cycle int, p ExecutionPolicy, note string) error {
 
 type Reservation struct {
 	AttemptInput
+	Bucket string
 	Model  string
 	Tokens int64
 	Cost   float64
@@ -118,7 +176,11 @@ func (s *Store) ReserveCall(r Reservation) (string, error) {
 	defer tx.Rollback()
 	var raw string
 	var unknown int
-	if err = tx.QueryRow(`SELECT policy FROM workflow_budgets WHERE project=? AND cycle=?`, s.project, r.Cycle).Scan(&raw); err != nil {
+	table, err := budgetTable(r.Bucket)
+	if err != nil {
+		return "", err
+	}
+	if err = tx.QueryRow(fmt.Sprintf(`SELECT policy FROM %s WHERE project=? AND cycle=?`, table), s.project, r.Cycle).Scan(&raw); err != nil {
 		return "", err
 	}
 	var p ExecutionPolicy
@@ -131,16 +193,16 @@ func (s *Store) ReserveCall(r Reservation) (string, error) {
 	if unknown > 0 {
 		return "", errors.New("unreconciled billing/usage: inspect status --attempts and reconcile-attempt before paid calls")
 	}
-	res, err := tx.Exec(`UPDATE workflow_budgets SET tokens=tokens+?,cost=cost+?,calls=calls+1 WHERE project=? AND cycle=? AND tokens+?<=? AND cost+?<=? AND calls<? AND active_ms<?`, r.Tokens, r.Cost, s.project, r.Cycle, r.Tokens, p.MaxTokens, r.Cost, p.MaxCostUSD, p.MaxCalls, p.MaxActiveSeconds*1000)
+	res, err := tx.Exec(fmt.Sprintf(`UPDATE %s SET tokens=tokens+?,cost=cost+?,calls=calls+1 WHERE project=? AND cycle=? AND tokens+?<=? AND cost+?<=? AND calls<? AND active_ms<?`, table), r.Tokens, r.Cost, s.project, r.Cycle, r.Tokens, p.MaxTokens, r.Cost, p.MaxCostUSD, p.MaxCalls, p.MaxActiveSeconds*1000)
 	if err != nil {
 		return "", err
 	}
 	n, _ := res.RowsAffected()
 	if n != 1 {
-		return "", errors.New("cycle budget exhausted; no request dispatched")
+		return "", fmt.Errorf("%s budget exhausted; no request dispatched", bucketName(r.Bucket))
 	}
 	id := newID("att")
-	_, err = tx.Exec(`INSERT INTO workflow_attempts(id,project,cycle,ticket_id,role,kind,request_hash,state,started_at,reserved_tokens,reserved_cost,model) VALUES(?,?,?,?,?,?,?,'in_flight',?,?,?,?)`, id, s.project, r.Cycle, r.TicketID, r.Role, r.Kind, r.RequestHash, now(), r.Tokens, r.Cost, r.Model)
+	_, err = tx.Exec(`INSERT INTO workflow_attempts(id,project,cycle,ticket_id,role,kind,request_hash,state,started_at,reserved_tokens,reserved_cost,model,bucket) VALUES(?,?,?,?,?,?,?,'in_flight',?,?,?,?,?)`, id, s.project, r.Cycle, r.TicketID, r.Role, r.Kind, r.RequestHash, now(), r.Tokens, r.Cost, r.Model, bucketName(r.Bucket))
 	if err != nil {
 		return "", err
 	}
@@ -179,7 +241,12 @@ func (s *Store) SettleCall(id string, r CallResult) error {
 	var cycle int
 	var tokens int64
 	var cost float64
-	if err = tx.QueryRow(`SELECT cycle,reserved_tokens,reserved_cost FROM workflow_attempts WHERE id=? AND project=? AND state='in_flight'`, id, s.project).Scan(&cycle, &tokens, &cost); err != nil {
+	var bucket string
+	if err = tx.QueryRow(`SELECT cycle,reserved_tokens,reserved_cost,bucket FROM workflow_attempts WHERE id=? AND project=? AND state='in_flight'`, id, s.project).Scan(&cycle, &tokens, &cost, &bucket); err != nil {
+		return err
+	}
+	table, err := budgetTable(bucket)
+	if err != nil {
 		return err
 	}
 	actualTokens := tokens
@@ -190,7 +257,7 @@ func (s *Store) SettleCall(id string, r CallResult) error {
 	if r.Cost != nil {
 		actualCost = *r.Cost
 	}
-	_, err = tx.Exec(`UPDATE workflow_budgets SET tokens=tokens+?,cost=cost+? WHERE project=? AND cycle=?`, actualTokens-tokens, actualCost-cost, s.project, cycle)
+	_, err = tx.Exec(fmt.Sprintf(`UPDATE %s SET tokens=tokens+?,cost=cost+? WHERE project=? AND cycle=?`, table), actualTokens-tokens, actualCost-cost, s.project, cycle)
 	if err != nil {
 		return err
 	}
@@ -218,8 +285,12 @@ func (s *Store) ReconcileBilling(id string, cost float64, tokens int64, referenc
 	var cycle, known, usage int
 	var oldTokens int64
 	var oldCost float64
-	var state string
-	if err = tx.QueryRow(`SELECT cycle,cost_known,usage_known,reserved_tokens,reserved_cost,state FROM workflow_attempts WHERE project=? AND id=?`, s.project, id).Scan(&cycle, &known, &usage, &oldTokens, &oldCost, &state); err != nil {
+	var state, bucket string
+	if err = tx.QueryRow(`SELECT cycle,cost_known,usage_known,reserved_tokens,reserved_cost,state,bucket FROM workflow_attempts WHERE project=? AND id=?`, s.project, id).Scan(&cycle, &known, &usage, &oldTokens, &oldCost, &state, &bucket); err != nil {
+		return err
+	}
+	table, err := budgetTable(bucket)
+	if err != nil {
 		return err
 	}
 	if state == AttemptInFlight {
@@ -234,7 +305,7 @@ func (s *Store) ReconcileBilling(id string, cost float64, tokens int64, referenc
 	if known != 0 && usage != 0 {
 		return errors.New("attempt already reconciled")
 	}
-	_, err = tx.Exec(`UPDATE workflow_budgets SET tokens=tokens+?,cost=cost+? WHERE project=? AND cycle=?`, tokens-oldTokens, cost-oldCost, s.project, cycle)
+	_, err = tx.Exec(fmt.Sprintf(`UPDATE %s SET tokens=tokens+?,cost=cost+? WHERE project=? AND cycle=?`, table), tokens-oldTokens, cost-oldCost, s.project, cycle)
 	if err != nil {
 		return err
 	}
@@ -291,7 +362,12 @@ func (s *Store) ChargeRepair(cycle int, ticket string, maxAttempts int) error {
 }
 
 func (s *Store) StartSession(cycle int) (string, time.Time, error) {
-	b, err := s.Budget(cycle)
+	return s.StartBucketSession(cycle, BucketWorker)
+}
+
+// StartBucketSession brackets active time charged to one budget bucket.
+func (s *Store) StartBucketSession(cycle int, bucket string) (string, time.Time, error) {
+	b, err := s.BucketBudget(cycle, bucket)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -306,7 +382,7 @@ func (s *Store) StartSession(cycle int) (string, time.Time, error) {
 		expires = deadline
 	}
 	id := newID("work")
-	_, err = s.db.Exec(`INSERT INTO workflow_sessions(id,project,cycle,started_ms,expires_ms,deadline_ms) VALUES(?,?,?,?,?,?)`, id, s.project, cycle, start.UnixMilli(), expires.UnixMilli(), deadline.UnixMilli())
+	_, err = s.db.Exec(`INSERT INTO workflow_sessions(id,project,cycle,started_ms,expires_ms,deadline_ms,bucket) VALUES(?,?,?,?,?,?,?)`, id, s.project, cycle, start.UnixMilli(), expires.UnixMilli(), deadline.UnixMilli(), bucketName(bucket))
 	return id, deadline, err
 }
 func (s *Store) HeartbeatSession(id string) error {
@@ -328,9 +404,14 @@ func (s *Store) EndSession(id string, recovered bool) error {
 	defer tx.Rollback()
 	var cycle int
 	var started, expires int64
-	if err = tx.QueryRow(`SELECT cycle,started_ms,expires_ms FROM workflow_sessions WHERE project=? AND id=? AND closed=0`, s.project, id).Scan(&cycle, &started, &expires); errors.Is(err, sql.ErrNoRows) {
+	var bucket string
+	if err = tx.QueryRow(`SELECT cycle,started_ms,expires_ms,bucket FROM workflow_sessions WHERE project=? AND id=? AND closed=0`, s.project, id).Scan(&cycle, &started, &expires, &bucket); errors.Is(err, sql.ErrNoRows) {
 		return nil
 	} else if err != nil {
+		return err
+	}
+	table, err := budgetTable(bucket)
+	if err != nil {
 		return err
 	}
 	end := time.Now().UnixMilli()
@@ -340,7 +421,7 @@ func (s *Store) EndSession(id string, recovered bool) error {
 	if end < started {
 		end = started
 	}
-	_, err = tx.Exec(`UPDATE workflow_budgets SET active_ms=active_ms+? WHERE project=? AND cycle=?`, end-started, s.project, cycle)
+	_, err = tx.Exec(fmt.Sprintf(`UPDATE %s SET active_ms=active_ms+? WHERE project=? AND cycle=?`, table), end-started, s.project, cycle)
 	if err != nil {
 		return err
 	}

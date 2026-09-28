@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-const aPrompt = "context/alcance.md"
+const aPrompt = "project/alcance.md"
 
 // extract runs Extract and indexes the outcome by path, which is how every
 // test below asks "what happened to this file?".
@@ -70,7 +70,7 @@ func TestExtractCreatesEveryTemplateAndAManifest(t *testing.T) {
 			t.Errorf("%s: disposition = %v, expected Created", path, r.How)
 		}
 	}
-	for _, want := range []string{aPrompt, "context/alcance.md", "context/producto.md", "yanai.config.json"} {
+	for _, want := range []string{aPrompt, "project/estado.md", "yanai.config.json"} {
 		if _, ok := results[want]; !ok {
 			t.Errorf("%s was not extracted", want)
 		}
@@ -80,14 +80,19 @@ func TestExtractCreatesEveryTemplateAndAManifest(t *testing.T) {
 	}
 }
 
-func TestProjectStartsWithBlankPrompts(t *testing.T) {
+func TestProjectStartsWithProjectDocumentsAndNoFixedRoles(t *testing.T) {
 	dest := t.TempDir()
 	if _, _, err := ExtractProject(dest); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"ingeniero.md", "arquitecto-bd.md", "disenador.md"} {
-		if got := read(t, filepath.Join(dest, "prompts", name)); got != "" {
-			t.Errorf("%s should start blank", name)
+		if _, err := os.Stat(filepath.Join(dest, "prompts", name)); !os.IsNotExist(err) {
+			t.Errorf("%s should not be created for a new workspace", name)
+		}
+	}
+	for _, dir := range []string{"prompts/base", "prompts/generated"} {
+		if info, err := os.Stat(filepath.Join(dest, dir)); err != nil || !info.IsDir() {
+			t.Errorf("%s was not created: %v", dir, err)
 		}
 	}
 	var cfg map[string]any

@@ -31,6 +31,10 @@ const (
 	// that state. It is a handoff to the independent review of Step 9, never
 	// a claim that the work is verified.
 	PhaseAwaitingReview = "awaiting_review"
+	// PhaseCompleted is reached only when a human accepts the closing
+	// project-state update for a reviewed branch ('yanai close'). It records
+	// that the ticket branch exists and was reviewed, never that it merged.
+	PhaseCompleted = "completed"
 )
 
 // TerminalPhases close a cycle without a plan. Distinguishing them from a
@@ -105,6 +109,14 @@ func init() {
 	// cycle's checks passed against the applied state.
 	allow(PhaseApproved, []string{PhaseAwaitingReview}, ActorEngine)
 	allow(PhaseAwaitingExecution, []string{PhaseAwaitingReview}, ActorEngine)
+	// A worker that finds nothing to change ends the cycle with the existing
+	// no-change finding, after returning the checkout to its original branch.
+	allow(PhaseApproved, []string{PhaseNoChangeNeeded}, ActorEngine)
+	allow(PhaseAwaitingExecution, []string{PhaseNoChangeNeeded}, ActorEngine)
+	// A paused level 0 execution (observation, blocked worker) is resumable.
+	allow(PhaseAwaitingExecution, []string{PhaseApproved}, ActorEngine)
+	// Only a human's acceptance of the closing state update completes a cycle.
+	allow(PhaseAwaitingReview, []string{PhaseCompleted}, ActorHuman)
 }
 
 var ticketTransitions = map[edge][]string{
