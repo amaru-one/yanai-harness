@@ -61,7 +61,7 @@ func TestOwnPatchSuccessorsAndInterruptedRecovery(t *testing.T) {
 		t.Fatal("pending patch silently authorized")
 	}
 	external := copyRepo(next)
-	external.Content["yanai-server/other.go"] = "external"
+	external.Content["yanai-ui/other.go"] = "external"
 	if err := s.ReconcilePatch(1, hash, external); err == nil {
 		t.Fatal("external edit accepted")
 	}

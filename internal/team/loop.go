@@ -73,7 +73,9 @@ type agentRun struct {
 	// Final is the run's terminal tool. When the budget or the step limit
 	// leaves room for only one more turn, it is the only tool offered.
 	Final string
-	Retry bool
+	// Reasoning, when positive, caps the model's reasoning tokens per call.
+	Reasoning int
+	Retry     bool
 	// Execute runs one validated tool call. A step replayed after a restart
 	// arrives with State responded or intent; intent means a side effect may
 	// already have happened and Execute must recognize it rather than repeat
@@ -443,7 +445,7 @@ func (r *Runner) agentCall(ctx context.Context, run agentRun, seq int, messages 
 	}
 	defer func() { r.captureResponse = nil }()
 	fmt.Fprintf(os.Stderr, "→ %s (%s) thinking…\n", run.Role, run.Model)
-	m, usage, err := r.Client.ChatTools(ctx, run.Model, messages, tools, force, run.Temperature, run.MaxTokens, r.observer(ctx, run.Role, run.Model, "agent_turn", run.MaxTokens, run.Bucket, run.Policy))
+	m, usage, err := r.Client.ChatTools(ctx, run.Model, messages, tools, force, run.Reasoning, run.Temperature, run.MaxTokens, r.observer(ctx, run.Role, run.Model, "agent_turn", run.MaxTokens, run.Bucket, run.Policy))
 	return m, usage, ref, err
 }
 
@@ -462,7 +464,10 @@ func describeCall(m openrouter.Message) string {
 		}
 		return fmt.Sprintf("%s %s", m.ToolCalls[0].Function.Name, strings.Join(names, ", "))
 	}
-	for _, key := range []string{"path", "check_id", "result"} {
+	if pattern, ok := args["pattern"].(string); ok {
+		return fmt.Sprintf("%s %q", m.ToolCalls[0].Function.Name, pattern)
+	}
+	for _, key := range []string{"path", "glob", "check_id", "result"} {
 		if v, ok := args[key].(string); ok {
 			return fmt.Sprintf("%s %s", m.ToolCalls[0].Function.Name, v)
 		}

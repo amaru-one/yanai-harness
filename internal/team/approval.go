@@ -192,7 +192,7 @@ func (r *Runner) levelZeroContract(st *ws.State) (workflow.ExecutionContract, pr
 	var options []workflow.ModelOptionTerms
 	for _, opt := range files.Config.Models[agent.ModelCategory].Options {
 		price := files.Config.Execution.Prices[opt.Model]
-		options = append(options, workflow.ModelOptionTerms{Model: opt.Model, Difficulty: append([]string(nil), opt.Difficulty...), Strengths: opt.Strengths, Weaknesses: opt.Weaknesses, Benchmarks: opt.Benchmarks, InputUSD: price.Input, OutputUSD: price.Output})
+		options = append(options, workflow.ModelOptionTerms{Model: opt.Model, Difficulty: append([]string(nil), opt.Difficulty...), Strengths: opt.Strengths, Weaknesses: opt.Weaknesses, ContextTokens: opt.ContextTokens, ReasoningMaxTokens: opt.ReasoningMaxTokens, InputUSD: price.Input, OutputUSD: price.Output})
 	}
 	worker := workflow.WorkerTerms{ID: agent.ID, Name: agent.Name, Purpose: agent.Purpose, Model: agent.Model, Temperature: agent.Temperature, MaxTokens: agent.MaxTokens, MaxSteps: agent.MaxSteps, Prompt: agent.Prompt, PromptSHA256: prompt.SHA256,
 		ModelCategory: agent.ModelCategory, ModelOptions: options, ModelReason: o.ModelReason, TaskComplexity: o.TaskComplexity, ComplexityReason: o.ComplexityReason}
@@ -611,7 +611,7 @@ func renderModelOptions(w workflow.WorkerTerms) string {
 		if o.Model == w.Model {
 			mark = "*"
 		}
-		fmt.Fprintf(&b, "  %s %s — covers %s — $%.3f in / $%.3f out per million — %s\n", mark, o.Model, strings.Join(o.Difficulty, ", "), o.InputUSD, o.OutputUSD, o.Strengths)
+		fmt.Fprintf(&b, "  %s %s — covers %s — context %d tokens — $%.3f in / $%.3f out per million — %s\n", mark, o.Model, strings.Join(o.Difficulty, ", "), o.ContextTokens, o.InputUSD, o.OutputUSD, o.Strengths)
 	}
 	return b.String()
 }

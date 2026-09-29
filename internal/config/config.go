@@ -45,13 +45,17 @@ type ModelOption struct {
 	Difficulty []string `json:"difficulty"`
 	Strengths  string   `json:"strengths"`
 	Weaknesses string   `json:"weaknesses,omitempty"`
-	// Benchmarks is free text with figures and their source, e.g.
-	// "SWE-bench Verified 68% (model card, 2026-05)".
-	Benchmarks string `json:"benchmarks,omitempty"`
+	// ContextTokens is the model's context window: prompt, history, tool
+	// results and answer together.
+	ContextTokens int `json:"context_tokens"`
+	// ReasoningMaxTokens, when set, caps the model's reasoning per call
+	// (OpenRouter's reasoning.max_tokens). Leave it unset for models that do
+	// not support a cap, or where sending it would switch thinking on.
+	ReasoningMaxTokens int `json:"reasoning_max_tokens,omitempty"`
 }
 
 // Difficulties are the task levels, from easiest to hardest.
-var Difficulties = []string{"baja", "media", "alta"}
+var Difficulties = []string{"low", "medium", "high"}
 
 // ValidDifficulty reports whether d is one of Difficulties.
 func ValidDifficulty(d string) bool {
@@ -282,6 +286,12 @@ func validateCategory(key string, category ModelCategory) error {
 		seen[m] = true
 		if strings.TrimSpace(o.Strengths) == "" {
 			return fmt.Errorf("model %s (category %s) needs \"strengths\"", m, key)
+		}
+		if o.ContextTokens <= 0 {
+			return fmt.Errorf("model %s (category %s) needs \"context_tokens\": its context window in tokens", m, key)
+		}
+		if o.ReasoningMaxTokens < 0 {
+			return fmt.Errorf("model %s (category %s) has a negative \"reasoning_max_tokens\"", m, key)
 		}
 		if len(o.Difficulty) == 0 {
 			return fmt.Errorf("model %s (category %s) needs \"difficulty\": some of %s", m, key, strings.Join(Difficulties, ", "))

@@ -292,6 +292,28 @@ func (n *Native) Read(path string) (*File, error) {
 func (n *Native) InAllowedPaths(path string) bool {
 	return n.target.CheckPath(path) == nil
 }
+
+// ListFiles lists readable files of the current checkout after checking it
+// is the state the engine recorded, so the worker sees its own edits.
+func (n *Native) ListFiles(dir, glob string) ([]repository.Listed, bool, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if _, err := n.guard(); err != nil {
+		return nil, false, err
+	}
+	return n.target.ListFiles(dir, glob)
+}
+
+// Grep searches the current checkout under the same guard as ListFiles.
+func (n *Native) Grep(pattern, dir, glob string, ignoreCase bool) ([]repository.Hit, bool, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if _, err := n.guard(); err != nil {
+		return nil, false, err
+	}
+	return n.target.Grep(pattern, dir, glob, ignoreCase)
+}
+
 func (n *Native) Search(paths []string, literal string) ([]Match, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()

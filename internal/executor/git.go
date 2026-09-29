@@ -230,7 +230,7 @@ func changedSince(head, current workflow.RepositoryState) []string {
 	return out
 }
 
-// Commit records every uncommitted change of the ticket's owned outputs as
+// Commit records every uncommitted change the ticket allows as
 // one commit on the ticket branch. message is already validated by the
 // caller; the harness appends its own operation trailer. The commit object
 // is built from a temporary index, never the checkout's own index, and is
@@ -270,14 +270,8 @@ func (n *Native) Commit(ticket, message string) (workflow.GitCommitRecord, error
 		return workflow.GitCommitRecord{}, errors.New("unknown approved ticket")
 	}
 	for _, p := range paths {
-		owned := false
-		for _, out := range approved.Outputs {
-			if p == out {
-				owned = true
-			}
-		}
-		if !owned {
-			return workflow.GitCommitRecord{}, fmt.Errorf("uncommitted change outside the worker's owned outputs: %s", p)
+		if !approved.Allows(p) {
+			return workflow.GitCommitRecord{}, fmt.Errorf("uncommitted change outside the approved ticket: %s", p)
 		}
 	}
 	tree, err := n.buildTree(session.ExpectedSHA, paths, current)

@@ -3,6 +3,7 @@ package team
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,11 +12,13 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/yanai/yanai-harness/internal/executor"
 	"github.com/yanai/yanai-harness/internal/openrouter"
 	"github.com/yanai/yanai-harness/internal/orchestrator"
 	"github.com/yanai/yanai-harness/internal/repoctx"
+	"github.com/yanai/yanai-harness/internal/repository"
 	"github.com/yanai/yanai-harness/internal/workflow"
 	"github.com/yanai/yanai-harness/internal/ws"
 )
@@ -26,21 +29,28 @@ const maxFailureBytes = 12 << 10
 
 const workerProtocol = `HARNESS PROTOCOL (level 0; mandatory, takes precedence over other instructions):
 - Write prompts, explanations, observations, commit messages, and Markdown documents in English. Preserve literal paths, identifiers, and schema values.
-- You work on ticket branch %s in the real repository. You may only create, modify, or delete your owned files; you may read any allowed file.
+- You work on ticket branch %s in the real repository. You may read, create, modify, or delete any repository file except protected ones (.git, .env files, keys, credentials, ignored files). The expected files listed in your first message are the plan; when the task needs other files, change them and say why in finish.
 - Exactly one tool per turn. If the harness says only finish is available, call it with what you have.
-- read_file takes up to 10 paths and returns each complete file and its sha256; every turn resends the whole conversation, so request all the files you need in one call. write_file writes the COMPLETE content of an owned file (never fragments or "the rest stays the same"): pass expected_sha256 with the current sha256 (from read_file), or expected_absent=true to create it; delete=true deletes it.
+- Keep your reasoning brief and make one change per turn: your output limit covers reasoning and the tool call together, and a turn cut off at the limit is wasted.
+- Files under "Files already loaded" in your first message are current, with their sha256; do not read them again. To find code, use grep (regular expression over file contents) or list_files (paths and sizes) first, then read only what you need. read_file takes up to 10 paths and returns each file and its sha256 (start_line/end_line read only a range); every turn resends the whole conversation, so request all the files you need in one call.
+- To change an existing file, prefer edit_file: it replaces one exact piece of text that occurs exactly once (pass the file's current sha256). write_file writes the COMPLETE content of a file (never fragments or "the rest stays the same"); use it to create files (expected_absent=true) or to rewrite most of one (expected_sha256); delete=true deletes it. Every write returns the new sha256 for your next edit.
+- run_command asks the human to run any command (docker compose, npm, curl, bash -c for pipelines, ...). Every command needs their approval, so the run pauses until they decide, and they may deny it: prefer the built-in tools and approved checks, and give a clear reason. Files the command changes become part of your work.
 - run_check executes an approved check by id. Before each commit, all required checks (%s) must pass against the current state; any edit invalidates previous results.
 - commit commits ALL your pending changes. Use a Conventional Commits message: first line "%s(%s): <summary>", optional body, and the exact trailers "Yanai-Ticket: %s" and "Yanai-Agent: %s" at the end. The harness adds its own operation trailer; do not write other Yanai- trailers.
-- Call finish when done: result="completed" (commits exist, no uncommitted changes remain, and all approved checks pass against the final state; the harness reruns them), "no_change" (the task needs no changes: no commits or edits; explain why), or "blocked" with observations for the human (for example, when you need an unowned file, variable, tool, or configuration change). Human responses do not expand the approved contract.
+- Call finish when done: result="completed" (commits exist, no uncommitted changes remain, and all approved checks pass against the final state; the harness reruns them), "no_change" (the task needs no changes: no commits or edits; explain why), or "blocked" with observations for the human (for example, when you need a variable, tool, secret, or configuration change). Human responses do not expand the approved contract.
 - If a check fails because of the environment (missing variable, tool, or library), report an observation; do not change code to hide the failure.
 - Do not claim success without evidence: the harness verifies commits and checks.`
 
 func workerTools() []openrouter.Tool {
 	return []openrouter.Tool{
 		orchestrator.ReadFileTool(),
-		{Type: "function", Function: openrouter.ToolFunction{Name: "write_file", Description: "Write, create or delete one owned file with complete content.", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"expected_sha256":{"type":"string"},"expected_absent":{"type":"boolean"},"delete":{"type":"boolean"}},"required":["path"],"additionalProperties":false}`)}},
+		orchestrator.ListFilesTool(),
+		orchestrator.GrepTool(),
+		orchestrator.RunCommandTool(),
+		{Type: "function", Function: openrouter.ToolFunction{Name: "write_file", Description: "Write, create or delete one repository file with complete content.", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"expected_sha256":{"type":"string"},"expected_absent":{"type":"boolean"},"delete":{"type":"boolean"}},"required":["path"],"additionalProperties":false}`)}},
+		{Type: "function", Function: openrouter.ToolFunction{Name: "edit_file", Description: "Replace one exact, unique piece of text in an existing repository file. Cheaper than rewriting the whole file.", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string","description":"exact text to replace; must occur exactly once"},"new":{"type":"string"},"expected_sha256":{"type":"string"}},"required":["path","old","new","expected_sha256"],"additionalProperties":false}`)}},
 		{Type: "function", Function: openrouter.ToolFunction{Name: "run_check", Description: "Run one approved check by id against the current checkout.", Parameters: json.RawMessage(`{"type":"object","properties":{"check_id":{"type":"string"}},"required":["check_id"],"additionalProperties":false}`)}},
-		{Type: "function", Function: openrouter.ToolFunction{Name: "commit", Description: "Commit every pending owned change on the ticket branch with a Conventional Commits message.", Parameters: json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}`)}},
+		{Type: "function", Function: openrouter.ToolFunction{Name: "commit", Description: "Commit every pending change on the ticket branch with a Conventional Commits message.", Parameters: json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}`)}},
 		{Type: "function", Function: openrouter.ToolFunction{Name: "finish", Description: "End the run: completed, no_change, or blocked with observations.", Parameters: json.RawMessage(`{"type":"object","properties":{"result":{"type":"string","enum":["completed","no_change","blocked"]},"explanation":{"type":"string"},"observations":{"type":"array","items":{"type":"object","properties":{"description":{"type":"string"},"requirement":{"type":"string"},"question":{"type":"string"}},"required":["description","requirement","question"]}}},"required":["result","explanation"],"additionalProperties":false}`)}},
 	}
 }
@@ -55,8 +65,17 @@ type workerState struct {
 
 func (s *workerState) observe(tool string, result map[string]any) {
 	switch tool {
-	case "write_file":
+	case "write_file", "edit_file":
 		if ok, _ := result["ok"].(bool); ok {
+			if s.phases == 0 || s.failedSince {
+				s.phases++
+				s.failedSince = false
+			}
+			s.passed = map[string]string{}
+		}
+	case "run_command":
+		// Files a command changed invalidate earlier check results like a write.
+		if changed, _ := result["changed_files"].([]any); len(changed) > 0 {
 			if s.phases == 0 || s.failedSince {
 				s.phases++
 				s.failedSince = false
@@ -247,7 +266,7 @@ func (r *Runner) runWorker(ctx context.Context, st *ws.State, c workflow.Executi
 	if err != nil {
 		return finishArgs{}, err
 	}
-	initial, err := r.workerInput(st, c, backend)
+	initial, err := r.workerInput(st, c, backend, runKey)
 	if err != nil {
 		return finishArgs{}, err
 	}
@@ -288,8 +307,11 @@ func (r *Runner) runWorker(ctx context.Context, st *ws.State, c workflow.Executi
 		Key: runKey, Role: terms.Worker.ID, Bucket: workflow.BucketWorker, Model: terms.Worker.Model, Temperature: terms.Worker.Temperature,
 		MaxTokens: terms.Worker.MaxTokens, MaxSteps: terms.Worker.MaxSteps, Policy: c.Policy,
 		System:  system.Content + "\n\n" + fmt.Sprintf(workerProtocol, terms.TicketBranch, strings.Join(task.Evidence, ", "), terms.TicketType, terms.CommitScope, terms.Slug, terms.Worker.ID),
-		Initial: initial, Tools: workerTools(), Final: "finish", Retry: retry,
+		Initial: initial, Tools: workerTools(), Final: "finish", Reasoning: approvedReasoningCap(terms), Retry: retry,
 		Execute: func(ctx context.Context, step workflow.AgentStep, mark func(any) error) (toolOutcome, error) {
+			if step.ToolName == "run_command" {
+				return r.workerCommand(ctx, st.Cycle, agentRun{Key: runKey, Role: terms.Worker.ID}, backend, state, step, mark)
+			}
 			outcome, err := r.workerTool(ctx, st, c, backend, state, step, mark)
 			if err == nil {
 				state.observe(step.ToolName, encodeResult(outcome))
@@ -312,13 +334,39 @@ func (r *Runner) runWorker(ctx context.Context, st *ws.State, c workflow.Executi
 	return final, nil
 }
 
+// workerCommand runs a run_command step once the human approved it.
+func (r *Runner) workerCommand(ctx context.Context, cycle int, run agentRun, backend *executor.Native, state *workerState, step workflow.AgentStep, mark func(any) error) (toolOutcome, error) {
+	req, outcome, err := r.commandGate(cycle, run, step, "yanai run --ws "+r.Workspace.Root)
+	if err != nil || outcome != nil {
+		if outcome != nil {
+			return *outcome, nil
+		}
+		return toolOutcome{}, err
+	}
+	id := workflow.CommandID(run.Key, step.Seq)
+	if err := mark(map[string]any{"command": id}); err != nil {
+		return toolOutcome{}, err
+	}
+	fmt.Fprintf(os.Stderr, "    running approved command %s: %s\n", id, quoteArgs(req.Args))
+	res, err := backend.RunCommand(ctx, id, req.Args, req.Dir, time.Duration(req.TimeoutSeconds)*time.Second)
+	if err != nil && isGuardFailure(err) {
+		return toolOutcome{}, err
+	}
+	if err != nil {
+		return toolError("%v", err), nil
+	}
+	result := commandOutcome(res)
+	state.observe(step.ToolName, encodeResult(result))
+	return result, nil
+}
+
 func encodeResult(o toolOutcome) map[string]any {
 	var m map[string]any
 	_ = json.Unmarshal(encodeOutcome(o), &m)
 	return m
 }
 
-func (r *Runner) workerInput(st *ws.State, c workflow.ExecutionContract, backend *executor.Native) (string, error) {
+func (r *Runner) workerInput(st *ws.State, c workflow.ExecutionContract, backend *executor.Native, runKey string) (string, error) {
 	terms := c.Level0
 	task := c.Plan.Tickets[0]
 	var b strings.Builder
@@ -348,7 +396,7 @@ func (r *Runner) workerInput(st *ws.State, c workflow.ExecutionContract, backend
 	for _, cr := range task.Criteria {
 		fmt.Fprintf(&b, "- %s\n", cr)
 	}
-	b.WriteString("\nOwned files (only these may be written):\n")
+	b.WriteString("\nExpected files (the plan; other repository files may be changed when needed):\n")
 	for _, out := range task.Outputs {
 		fmt.Fprintf(&b, "- %s\n", out)
 	}
@@ -383,6 +431,11 @@ func (r *Runner) workerInput(st *ws.State, c workflow.ExecutionContract, backend
 		return "", err
 	}
 	fmt.Fprintf(&b, "\n# Repository index\n\n%s\n", index)
+	preloaded, err := r.preloadedFiles(st, task, backend, runKey)
+	if err != nil {
+		return "", err
+	}
+	b.WriteString(preloaded)
 	if session, found, err := backend.GitSession(); err == nil && found && len(session.Commits) > 0 {
 		b.WriteString("\n# Existing commits on the ticket branch\n")
 		for _, commit := range session.Commits {
@@ -440,7 +493,7 @@ func fileSHA(f *executor.File) string {
 
 func (r *Runner) workerTool(ctx context.Context, st *ws.State, c workflow.ExecutionContract, backend *executor.Native, state *workerState, step workflow.AgentStep, mark func(any) error) (toolOutcome, error) {
 	task := c.Plan.Tickets[0]
-	owned := func(path string) bool {
+	expected := func(path string) bool {
 		for _, out := range task.Outputs {
 			if out == path {
 				return true
@@ -450,12 +503,12 @@ func (r *Runner) workerTool(ctx context.Context, st *ws.State, c workflow.Execut
 	}
 	switch step.ToolName {
 	case "read_file":
-		paths, err := orchestrator.ReadPaths(string(step.Arguments))
+		req, err := orchestrator.ParseRead(string(step.Arguments))
 		if err != nil {
 			return toolError("%v", err), nil
 		}
-		files := make([]map[string]any, 0, len(paths))
-		for _, path := range paths {
+		files := make([]map[string]any, 0, len(req.Paths))
+		for _, path := range req.Paths {
 			f, err := backend.Read(path)
 			switch {
 			case err != nil && isGuardFailure(err):
@@ -463,12 +516,30 @@ func (r *Runner) workerTool(ctx context.Context, st *ws.State, c workflow.Execut
 			case err != nil:
 				files = append(files, map[string]any{"path": path, "error": err.Error()})
 			case f == nil:
-				files = append(files, map[string]any{"path": path, "exists": false, "owned": owned(path)})
+				files = append(files, map[string]any{"path": path, "exists": false, "expected_output": expected(path)})
+			case req.Ranged():
+				text, err := repository.Lines(f.Data, req.StartLine, req.EndLine)
+				if err != nil {
+					files = append(files, map[string]any{"path": path, "error": err.Error()})
+					continue
+				}
+				// The sha256 is the whole file's, as edit_file and write_file expect.
+				files = append(files, map[string]any{"path": path, "exists": true, "expected_output": expected(path), "mode": fmt.Sprintf("%o", f.Mode), "sha256": fileSHA(f), "start_line": max(req.StartLine, 1), "total_lines": repository.LineCount(f.Data), "content": text})
 			default:
-				files = append(files, map[string]any{"path": path, "exists": true, "owned": owned(path), "mode": fmt.Sprintf("%o", f.Mode), "sha256": fileSHA(f), "content": string(f.Data)})
+				files = append(files, map[string]any{"path": path, "exists": true, "expected_output": expected(path), "mode": fmt.Sprintf("%o", f.Mode), "sha256": fileSHA(f), "content": string(f.Data)})
 			}
 		}
 		return toolOutcome{Result: map[string]any{"files": files}}, nil
+
+	case "list_files", "grep":
+		result, err := searchRepository(backend, step.ToolName, string(step.Arguments))
+		if err != nil && isGuardFailure(err) {
+			return toolOutcome{}, err
+		}
+		if err != nil {
+			return toolError("%v", err), nil
+		}
+		return toolOutcome{Result: result}, nil
 
 	case "write_file":
 		var args struct {
@@ -481,8 +552,8 @@ func (r *Runner) workerTool(ctx context.Context, st *ws.State, c workflow.Execut
 		if err := workflow.DecodeStrict(string(step.Arguments), &args); err != nil {
 			return toolError("write_file arguments: %v", err), nil
 		}
-		if !owned(args.Path) {
-			return toolError("%s is not one of your owned files; if the task needs it, finish with result=blocked and an observation", args.Path), nil
+		if !task.Allows(args.Path) {
+			return toolError("%s is outside the approved ticket; if the task needs it, finish with result=blocked and an observation", args.Path), nil
 		}
 		if args.Delete == (args.Content != nil) {
 			return toolError("pass either content or delete=true"), nil
@@ -518,23 +589,52 @@ func (r *Runner) workerTool(ctx context.Context, st *ws.State, c workflow.Execut
 		if args.Delete && current == nil {
 			return toolError("%s does not exist", args.Path), nil
 		}
-		phase := state.phases
-		if phase == 0 || state.failedSince {
-			phase++
+		return r.applyOwned(st, task, state, backend, mark, args.Path, current, next)
+
+	case "edit_file":
+		var args struct {
+			Path           string `json:"path"`
+			Old            string `json:"old"`
+			New            string `json:"new"`
+			ExpectedSHA256 string `json:"expected_sha256"`
 		}
-		if err := r.Workspace.Store.EnsureRepairAttempts(st.Cycle, task.ID, phase, task.MaxAttempts); err != nil {
-			return toolOutcome{}, fmt.Errorf("%w; the branch and its work are preserved", err)
+		if err := workflow.DecodeStrict(string(step.Arguments), &args); err != nil {
+			return toolError("edit_file arguments: %v", err), nil
 		}
-		if err := mark(map[string]any{"path": args.Path, "before": fileSHA(current), "after": fileSHA(next)}); err != nil {
-			return toolOutcome{}, err
+		if !task.Allows(args.Path) {
+			return toolError("%s is outside the approved ticket; if the task needs it, finish with result=blocked and an observation", args.Path), nil
 		}
-		if _, err := backend.Apply(task.ID, []executor.Edit{{Path: args.Path, Before: current, After: next}}); err != nil {
+		if args.Old == "" || args.Old == args.New {
+			return toolError("old must be nonempty text that differs from new"), nil
+		}
+		current, err := backend.Read(args.Path)
+		if err != nil {
 			if isGuardFailure(err) {
 				return toolOutcome{}, err
 			}
-			return toolError("write refused: %v", err), nil
+			return toolError("%v", err), nil
 		}
-		return toolOutcome{Result: map[string]any{"path": args.Path, "sha256": fileSHA(next), "deleted": next == nil}}, nil
+		if current == nil {
+			return toolError("%s does not exist; create it with write_file and expected_absent=true", args.Path), nil
+		}
+		if step.State == workflow.StepIntent {
+			var intent struct {
+				After string `json:"after"`
+			}
+			if json.Unmarshal(step.Intent, &intent) == nil && intent.After == fileSHA(current) {
+				// Applied before an interruption; the executor confirmed it.
+				return toolOutcome{Result: map[string]any{"path": args.Path, "sha256": fileSHA(current), "note": "already applied before a restart"}}, nil
+			}
+		}
+		if fileSHA(current) != args.ExpectedSHA256 {
+			return toolError("%s does not match expected_sha256 (it is %s now); read it again", args.Path, fileSHA(current)), nil
+		}
+		edited, err := replaceOnce(string(current.Data), args.Old, args.New)
+		if err != nil {
+			return toolError("%s: %v", args.Path, err), nil
+		}
+		next := &executor.File{Data: []byte(edited), Mode: current.Mode}
+		return r.applyOwned(st, task, state, backend, mark, args.Path, current, next)
 
 	case "run_check":
 		var args struct {
@@ -674,6 +774,114 @@ func (r *Runner) workerTool(ctx context.Context, st *ws.State, c workflow.Execut
 		return toolError("result must be completed, no_change or blocked"), nil
 	}
 	return toolError("unknown tool %s", step.ToolName), nil
+}
+
+// replaceOnce replaces old with new in content, requiring exactly one match
+// so an edit never lands somewhere the model did not intend.
+func replaceOnce(content, old, new string) (string, error) {
+	switch n := strings.Count(content, old); n {
+	case 0:
+		return "", errors.New("old text was not found; copy it exactly, including whitespace")
+	case 1:
+		return strings.Replace(content, old, new, 1), nil
+	default:
+		return "", fmt.Errorf("old text occurs %d times; include more surrounding lines so it matches exactly once", n)
+	}
+}
+
+// Bounds on the files preloaded into a worker's first message.
+const (
+	maxPreloadFiles = 12
+	maxPreloadBytes = 160 << 10
+)
+
+// preloadedFiles gives the worker, up front, its existing owned files and the
+// files the parent read for the accepted proposal, each read from the
+// approved checkout with its sha256, so it can edit without read turns. The
+// section is pinned as an artifact when the run starts, so a resumed run
+// keeps the first message its later steps were based on.
+func (r *Runner) preloadedFiles(st *ws.State, task workflow.Ticket, backend *executor.Native, runKey string) (string, error) {
+	store := r.Workspace.Store
+	artifacts := workflow.ArtifactStore{Root: r.Workspace.Root}
+	ref := workflow.ArtifactRef{ID: "worker-context-" + runKey, Path: fmt.Sprintf("cycles/%03d/agents/%s/preloaded.md", st.Cycle, runKey), Version: "1", Media: "text/markdown"}
+	if _, err := store.GetArtifact(st.Cycle, ref.ID); err == nil {
+		data, err := artifacts.Read(store, st.Cycle, ref.ID)
+		return string(data), err
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if steps, err := store.AgentSteps(st.Cycle, runKey); err != nil {
+		return "", err
+	} else if len(steps) > 0 {
+		return "", nil // a run that started without a preload keeps its first message
+	}
+	parentReads, err := r.planningReadPaths(st.Cycle, "", true)
+	if err != nil {
+		return "", err
+	}
+	candidates := append(append([]string(nil), task.Outputs...), parentReads...)
+	seen := map[string]bool{}
+	var b strings.Builder
+	files, size := 0, 0
+	for _, path := range candidates {
+		if seen[path] || files >= maxPreloadFiles || !backend.InAllowedPaths(path) {
+			continue
+		}
+		seen[path] = true
+		f, err := backend.Read(path)
+		if err != nil {
+			if isGuardFailure(err) {
+				return "", err
+			}
+			continue
+		}
+		if f == nil || size+len(f.Data) > maxPreloadBytes {
+			continue
+		}
+		if files == 0 {
+			b.WriteString("\n# Files already loaded (current content and sha256; do not read them again)\n")
+		}
+		files++
+		size += len(f.Data)
+		fmt.Fprintf(&b, "\n## %s\nsha256: %s\n\n```\n%s\n```\n", path, fileSHA(f), f.Data)
+	}
+	if _, err := artifacts.Publish(store, st.Cycle, ref, []byte(b.String())); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// approvedReasoningCap is the reasoning cap the approved catalog declares for
+// the worker's model, or 0 when it declares none.
+func approvedReasoningCap(terms *workflow.LevelZeroTerms) int {
+	for _, o := range terms.Worker.ModelOptions {
+		if o.Model == terms.Worker.Model {
+			return o.ReasoningMaxTokens
+		}
+	}
+	return 0
+}
+
+// applyOwned writes one owned file through the executor, after recording the
+// intent, within the task's repair-attempt allowance.
+func (r *Runner) applyOwned(st *ws.State, task workflow.Ticket, state *workerState, backend *executor.Native, mark func(any) error, path string, current, next *executor.File) (toolOutcome, error) {
+	phase := state.phases
+	if phase == 0 || state.failedSince {
+		phase++
+	}
+	if err := r.Workspace.Store.EnsureRepairAttempts(st.Cycle, task.ID, phase, task.MaxAttempts); err != nil {
+		return toolOutcome{}, fmt.Errorf("%w; the branch and its work are preserved", err)
+	}
+	if err := mark(map[string]any{"path": path, "before": fileSHA(current), "after": fileSHA(next)}); err != nil {
+		return toolOutcome{}, err
+	}
+	if _, err := backend.Apply(task.ID, []executor.Edit{{Path: path, Before: current, After: next}}); err != nil {
+		if isGuardFailure(err) {
+			return toolOutcome{}, err
+		}
+		return toolError("write refused: %v", err), nil
+	}
+	return toolOutcome{Result: map[string]any{"path": path, "sha256": fileSHA(next), "deleted": next == nil}}, nil
 }
 
 // isGuardFailure distinguishes "the checkout or approval is not what the

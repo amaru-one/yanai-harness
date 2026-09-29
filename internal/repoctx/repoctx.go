@@ -3,7 +3,6 @@ package repoctx
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -33,8 +32,9 @@ func selected(r config.Repo, path string) bool {
 	return false
 }
 
-// Index uses the same boundary checks as explicit reads; symlink targets,
-// ignored files, secrets and paths outside the configured boundary stay out.
+// Index lists the files Git knows about (tracked or untracked, never
+// ignored) that pass the same checks as explicit reads; symlinks, secrets
+// and paths outside the configured boundary stay out.
 func Index(r config.Repo) (string, error) {
 	target, err := repository.Open(r, "")
 	if err != nil {
@@ -44,51 +44,15 @@ func Index(r config.Repo) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	allowed := r.AllowedPaths
-	if len(allowed) == 0 {
-		allowed = []string{"."}
-	}
-	var paths []string
-	err = filepath.WalkDir(target.Root, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(target.Root, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if d.IsDir() {
-			included := false
-			for _, prefix := range allowed {
-				if prefix == "." || rel == prefix || strings.HasPrefix(rel, prefix+"/") || strings.HasPrefix(prefix, rel+"/") {
-					included = true
-				}
-			}
-			if !included || strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			for _, excluded := range r.ExcludeDirs {
-				if d.Name() == excluded {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 || !selected(r, rel) {
-			return nil
-		}
-		if err := target.CheckPath(rel); err != nil {
-			return nil
-		}
-		paths = append(paths, rel)
-		return nil
-	})
+	files, err := target.Files()
 	if err != nil {
 		return "", err
+	}
+	var paths []string
+	for _, rel := range files {
+		if selected(r, rel) {
+			paths = append(paths, rel)
+		}
 	}
 	sort.Strings(paths)
 	var b strings.Builder

@@ -106,7 +106,7 @@ func TestGitEnvironmentCannotRedirectTarget(t *testing.T) {
 func TestReadPolicyAppliesToIndexAndExplicitReads(t *testing.T) {
 	r := fixture(t)
 	write(t, r.Path, ".gitignore", "yanai-server/ignored.md\n")
-	denied := []string{"yanai-ui/SPEC.md", "notes.md", "yanai-server/.env", "yanai-server/.hidden/SPEC.md", "yanai-server/secrets.json", "yanai-server/credentials.json", "yanai-server/private.key", "yanai-server/vendor/SPEC.md", "yanai-server/ignored.md"}
+	denied := []string{"yanai-ui/SPEC.md", "notes.md", "yanai-server/.env", "yanai-server/.env.local", "yanai-server/secrets.json", "yanai-server/id_rsa", "yanai-server/credentials.json", "yanai-server/private.key", "yanai-server/vendor/SPEC.md", "yanai-server/ignored.md"}
 	for _, p := range denied {
 		write(t, r.Path, p, "DO_NOT_EXPOSE_CONTENT")
 	}
@@ -118,11 +118,20 @@ func TestReadPolicyAppliesToIndexAndExplicitReads(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(r.Path, "yanai-server", "linked")); err != nil {
 		t.Fatal(err)
 	}
+	// Ordinary dotfiles and env templates are repository files like any other.
+	for _, p := range []string{"yanai-server/.hidden/SPEC.md", "yanai-server/.env.example"} {
+		write(t, r.Path, p, "VISIBLE_DOTFILE")
+	}
 	denied = append(denied, "yanai-server/leak.md", "yanai-server/linked/secret.md", "../yanai-server/main.go", "/yanai-server/main.go", "yanai-server/../yanai-ui/SPEC.md", "yanai-server/../../outside", ".git/config")
 	target := open(t, r)
 	for _, p := range denied {
 		if err := target.CheckPath(p); err == nil {
 			t.Errorf("allowed protected path %q", p)
+		}
+	}
+	for _, p := range []string{"yanai-server/.hidden/SPEC.md", "yanai-server/.env.example"} {
+		if err := target.CheckPath(p); err != nil {
+			t.Errorf("denied ordinary dotfile %q: %v", p, err)
 		}
 	}
 	index, err := repoctx.Index(r)

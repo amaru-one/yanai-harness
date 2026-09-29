@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/yanai/yanai-harness/internal/workflow"
@@ -32,12 +31,15 @@ func validateCheck(c workflow.Check, allowlists ...map[string]workflow.CheckTool
 		if err := workflow.ValidateCheckArguments(c.Args); err != nil {
 			return err
 		}
+		if workflow.RepositoryProgram(c.Args[0]) {
+			return nil
+		}
 		if len(allowlists) == 0 {
-			return errors.New("check executable is not allowlisted")
+			return errors.New("check executable is not in execution.tools")
 		}
 		tool, ok := allowlists[0][c.Args[0]]
 		if !ok {
-			return errors.New("check executable is not allowlisted")
+			return errors.New("check executable is not in execution.tools")
 		}
 		return workflow.ValidateCheckTool(c.Args[0], tool)
 	}
@@ -212,34 +214,13 @@ func (n *Native) Check(ctx context.Context, id string) (CheckResult, error) {
 	if active := time.Duration(n.contract.Policy.MaxActiveSeconds) * time.Second; duration > active {
 		duration = active
 	}
-	ctx, cancel := context.WithTimeout(ctx, duration)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, args...)
-	cmd.Dir = result.Dir
-	cmd.Env = env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
-		return err
-	}
-	cmd.WaitDelay = time.Second
-	var output boundedOutput
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	err = cmd.Run()
-	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
-	if cmd.ProcessState != nil {
-		result.ExitCode = cmd.ProcessState.ExitCode()
-	}
+	p := runProcess(ctx, binary, args, result.Dir, env, duration)
+	err = p.Err
+	result.ExitCode = p.ExitCode
 	result.FinishedAt = time.Now().UTC()
-	result.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
-	result.Truncated = output.truncated
-	result.Output = string(output.data)
+	result.TimedOut = p.TimedOut
+	result.Truncated = p.Truncated
+	result.Output = p.Output
 	for _, value := range n.o.CheckInputs {
 		if value != "" {
 			result.Output = strings.ReplaceAll(result.Output, value, "[check input]")

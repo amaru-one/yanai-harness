@@ -13,7 +13,8 @@ import (
 )
 
 // Operator-owned Go toolchain settings are distinct from the human ticket's
-// project-specific check inputs. No caller environment is inherited by checks.
+// project-specific check inputs. Go checks inherit no caller environment;
+// other approved commands run with the operator's (see hostEnvironment).
 const (
 	GoBinaryEnv    = "YANAI_GO_BINARY"
 	GoCacheEnv     = "YANAI_GO_CACHE"
@@ -99,9 +100,6 @@ func (n *Native) resolveCheckTool(name string, tool workflow.CheckTool) (string,
 	if err != nil {
 		return "", err
 	}
-	if workflow.ForbiddenCheckProgram(binary) {
-		return "", errors.New("resolved check executable is forbidden")
-	}
 	info, err := os.Stat(binary)
 	if err != nil {
 		return "", err
@@ -109,41 +107,80 @@ func (n *Native) resolveCheckTool(name string, tool workflow.CheckTool) (string,
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
 		return "", errors.New("check tool must be an executable regular file")
 	}
-	// Resolve directory aliases too (e.g. macOS /var -> /private/var),
-	// without following the executable symlink out of a writable workspace.
-	invocationDir, err := filepath.EvalSymlinks(filepath.Dir(tool.Binary))
-	if err != nil {
-		return "", err
-	}
-	invocation := filepath.Join(invocationDir, filepath.Base(tool.Binary))
-	for _, root := range []string{n.target.Root, n.o.Artifacts.Root} {
-		canonical, err := filepath.EvalSymlinks(root)
-		if err != nil {
-			return "", err
-		}
-		for _, path := range []string{binary, invocation} {
-			rel, err := filepath.Rel(canonical, path)
-			if err != nil {
-				return "", err
-			}
-			if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return "", errors.New("check tool must be installed outside the target and workspace")
-			}
-		}
-	}
 	// Preserve the invocation path: Python virtual environments and other
 	// installations derive runtime configuration from their executable location.
 	return tool.Binary, nil
 }
+
+// resolveRepositoryProgram locates a program the repository itself provides
+// (./scripts/smoke.sh), relative to the command's directory. It must resolve
+// inside the checkout and be an executable regular file.
+func (n *Native) resolveRepositoryProgram(dir, program string) (string, error) {
+	return resolveRepositoryProgram(n.target.Root, dir, program)
+}
+
+func resolveRepositoryProgram(checkout, dir, program string) (string, error) {
+	root, err := filepath.EvalSymlinks(checkout)
+	if err != nil {
+		return "", err
+	}
+	path, err := filepath.EvalSymlinks(filepath.Join(checkout, filepath.FromSlash(dir), filepath.FromSlash(program)))
+	if err != nil {
+		return "", fmt.Errorf("program %s: %w", program, err)
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("program %s resolves outside the repository", program)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		return "", fmt.Errorf("program %s is not an executable file", program)
+	}
+	return path, nil
+}
+
+// hostEnvironment is the operator's own environment for human-approved
+// commands, so tools find their configuration (docker's CLI plugins under
+// HOME, for example). The harness's model key and the Git variables that
+// could redirect Git away from the checkout are removed, extraPath comes
+// first on PATH, and TMPDIR is the command's scratch folder.
+func hostEnvironment(scratch string, extraPath []string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		switch name {
+		case "OPENROUTER_API_KEY", "PATH", "TMPDIR", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE":
+			continue
+		}
+		env = append(env, kv)
+	}
+	dirs := append([]string(nil), extraPath...)
+	if path := os.Getenv("PATH"); path != "" {
+		dirs = append(dirs, path)
+	} else {
+		dirs = append(dirs, "/usr/bin", "/bin")
+	}
+	return append(env, "PATH="+strings.Join(dirs, string(os.PathListSeparator)), "TMPDIR="+scratch)
+}
+
 func (n *Native) checkEnvironment(c workflow.Check, scratch string) ([]string, string, error) {
 	if c.Args[0] == "go" {
 		return n.goCheckEnvironment(c, scratch)
 	}
-	binary, err := n.resolveCheckTool(c.Args[0], n.contract.Policy.Tools[c.Args[0]])
+	var binary string
+	var err error
+	if workflow.RepositoryProgram(c.Args[0]) {
+		binary, err = n.resolveRepositoryProgram(c.Dir, c.Args[0])
+	} else {
+		binary, err = n.resolveCheckTool(c.Args[0], n.contract.Policy.Tools[c.Args[0]])
+	}
 	if err != nil {
 		return nil, "", err
 	}
-	dirs := map[string]bool{filepath.Dir(binary): true}
+	dirs := map[string]bool{}
 	for name, tool := range n.contract.Policy.Tools {
 		path, err := n.resolveCheckTool(name, tool)
 		if err != nil {
@@ -156,8 +193,7 @@ func (n *Native) checkEnvironment(c workflow.Check, scratch string) ([]string, s
 		paths = append(paths, dir)
 	}
 	sort.Strings(paths)
-	paths = append(paths, "/usr/bin", "/bin")
-	env := []string{"PATH=" + strings.Join(paths, string(os.PathListSeparator)), "HOME=" + scratch, "TMPDIR=" + scratch, "LANG=C", "TZ=UTC"}
+	env := hostEnvironment(scratch, paths)
 	inputs, err := n.checkInputs(c)
 	if err != nil {
 		return nil, "", err

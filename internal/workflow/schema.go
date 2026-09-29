@@ -9,7 +9,7 @@ import (
 // storeSchemaVersion is the ladder this binary knows how to run. OpenStore
 // refuses a database stamped with a newer version: an old binary must never
 // guess at what a newer schema's columns mean.
-const storeSchemaVersion = 6
+const storeSchemaVersion = 7
 
 // migrations are applied in order, each in its own transaction, and never
 // rewritten once released — a later version only appends. Table DDL uses
@@ -250,6 +250,18 @@ CREATE TABLE workflow_config_activations (
  project TEXT NOT NULL, cycle INTEGER NOT NULL, contract_hash TEXT NOT NULL,
  state TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL,
  PRIMARY KEY(project, cycle, contract_hash)
+);
+`,
+	// v7: agents may ask to run any command; each request waits for a human
+	// decision (approve, approve always for the cycle, or deny).
+	`
+CREATE TABLE workflow_command_requests (
+ project TEXT NOT NULL, cycle INTEGER NOT NULL, id TEXT NOT NULL,
+ run TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL,
+ command TEXT NOT NULL, dir TEXT NOT NULL, reason TEXT NOT NULL,
+ status TEXT NOT NULL, always INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL, decided_at TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(project, cycle, id)
 );
 `,
 }
