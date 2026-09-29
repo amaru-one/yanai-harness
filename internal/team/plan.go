@@ -112,6 +112,24 @@ func (r *Runner) Plan(ctx context.Context, raw string, retry bool) (*ws.State, e
 	if err != nil {
 		return st, err
 	}
+	inputHash := pc.InputHash()
+	runKey := "plan-" + shortHash(inputHash)
+	// Files an earlier planning run of this cycle read are loaded up front, so
+	// a replan after observations does not pay read turns again. The baseline
+	// was verified unchanged above, so their content is what was read before.
+	readBytes := 0
+	earlier, err := r.planningReadPaths(st.Cycle, runKey, false)
+	if err != nil {
+		return st, err
+	}
+	for _, path := range earlier {
+		data, err := target.ReadFile(path, r.Cfg.Repo.MaxBytesFile+1)
+		if err != nil || len(data) > r.Cfg.Repo.MaxBytesFile || readBytes+len(data) > maxParentReadBytes {
+			continue
+		}
+		readBytes += len(data)
+		pc.AlreadyRead = append(pc.AlreadyRead, ws.Document{Path: path, Content: string(data), SHA256: workflow.Digest(string(data))})
+	}
 	initial, err := orchestrator.PlanningMessage(pc, ws.GeneratedPromptsDir+"/"+ticket.Slug+"/")
 	if err != nil {
 		return st, err
@@ -129,40 +147,45 @@ func (r *Runner) Plan(ctx context.Context, raw string, retry bool) (*ws.State, e
 			err = e
 		}
 	}()
-	inputHash := pc.InputHash()
-	runKey := "plan-" + shortHash(inputHash)
 	var validated orchestrator.Validated
 	var proposal orchestrator.Proposal
-	readBytes := 0
 	run := agentRun{
 		Key: runKey, Role: parentRole, Bucket: workflow.BucketParent, Model: parent.Model, Temperature: parent.Temperature,
 		MaxTokens: parent.MaxTokens, MaxSteps: parent.MaxSteps, Policy: parent.Budget.Policy(),
-		System: orchestrator.PlanningSystem(), Initial: initial, Tools: orchestrator.PlanningTools(), Final: "submit_proposal", Retry: retry,
+		System: orchestrator.PlanningSystem(), Initial: initial, Tools: orchestrator.PlanningTools(pc.BasePrompts), Final: "submit_proposal", Retry: retry,
 		Execute: func(ctx context.Context, step workflow.AgentStep, mark func(any) error) (toolOutcome, error) {
 			switch step.ToolName {
 			case "read_file":
-				paths, err := orchestrator.ReadPaths(string(step.Arguments))
+				req, err := orchestrator.ParseRead(string(step.Arguments))
 				if err != nil {
 					return toolError("%v", err), nil
 				}
 				// Each file succeeds or fails on its own; one bad path does not
 				// cost the turn that read the others.
-				files := make([]map[string]any, 0, len(paths))
-				for _, path := range paths {
-					data, err := target.ReadFile(path, r.Cfg.Repo.MaxBytesFile+1)
-					switch {
-					case err != nil:
-						files = append(files, map[string]any{"path": path, "error": err.Error()})
-					case len(data) > r.Cfg.Repo.MaxBytesFile:
-						files = append(files, map[string]any{"path": path, "error": fmt.Sprintf("larger than repo.max_file_bytes (%d); planning reads are bounded", r.Cfg.Repo.MaxBytesFile)})
-					case readBytes+len(data) > maxParentReadBytes:
-						files = append(files, map[string]any{"path": path, "error": fmt.Sprintf("the planning read budget of %d bytes is used up; submit the proposal", maxParentReadBytes)})
-					default:
+				files := make([]map[string]any, 0, len(req.Paths))
+				for _, path := range req.Paths {
+					entry, data := planningRead(target, req, path, r.Cfg.Repo.MaxBytesFile)
+					if data != "" && readBytes+len(data) > maxParentReadBytes {
+						entry = map[string]any{"path": path, "error": fmt.Sprintf("the planning read budget of %d bytes is used up; submit the proposal", maxParentReadBytes)}
+					} else if data != "" {
 						readBytes += len(data)
-						files = append(files, map[string]any{"path": path, "content": string(data)})
 					}
+					files = append(files, entry)
 				}
 				return toolOutcome{Result: map[string]any{"files": files}}, nil
+			case "run_command":
+				return r.parentCommand(ctx, st.Cycle, agentRun{Key: runKey, Role: parentRole}, target, step, mark, "yanai plan --ws "+r.Workspace.Root+" <the same ticket.md>")
+			case "list_files", "grep":
+				result, err := searchRepository(target, step.ToolName, string(step.Arguments))
+				if err != nil {
+					return toolError("%v", err), nil
+				}
+				size := len(mustJSON(result))
+				if readBytes+size > maxParentReadBytes {
+					return toolError("the planning read budget of %d bytes is used up; submit the proposal", maxParentReadBytes), nil
+				}
+				readBytes += size
+				return toolOutcome{Result: result}, nil
 			case "submit_proposal":
 				p, err := orchestrator.DecodeProposal(string(step.Arguments))
 				if err != nil {
@@ -193,7 +216,8 @@ func (r *Runner) Plan(ctx context.Context, raw string, retry bool) (*ws.State, e
 					return toolOutcome{}, err
 				}
 				if verr != nil {
-					return toolError("the proposal was rejected: %v. Fix it and call submit_proposal again.", verr), nil
+					problems := strings.Split(verr.Error(), "\n")
+					return toolError("the proposal was rejected; fix every problem below and call submit_proposal again:\n- %s", strings.Join(problems, "\n- ")), nil
 				}
 				proposal, validated = p, v
 				return toolOutcome{Result: map[string]any{"status": "accepted for human review", "proposal": id}, Terminal: true}, nil
@@ -439,4 +463,48 @@ func shortHash(h string) string {
 		return h[:16]
 	}
 	return h
+}
+
+// planningReadPaths lists, in first-read order, the files that planning runs
+// of cycle read successfully, skipping the run named exclude. With lastOnly,
+// only the most recent other planning run counts.
+func (r *Runner) planningReadPaths(cycle int, exclude string, lastOnly bool) ([]string, error) {
+	store := r.Workspace.Store
+	runs, err := store.AgentRuns(cycle, "plan-")
+	if err != nil {
+		return nil, err
+	}
+	var keep []string
+	for _, run := range runs {
+		if run != exclude {
+			keep = append(keep, run)
+		}
+	}
+	if lastOnly && len(keep) > 1 {
+		keep = keep[len(keep)-1:]
+	}
+	seen := map[string]bool{}
+	var paths []string
+	for _, run := range keep {
+		steps, err := store.AgentSteps(cycle, run)
+		if err != nil {
+			return nil, err
+		}
+		for _, step := range steps {
+			if step.ToolName != "read_file" || step.State != workflow.StepDone || step.IsError {
+				continue
+			}
+			requested, err := orchestrator.ReadPaths(string(step.Arguments))
+			if err != nil {
+				continue // an older protocol's single "path" argument
+			}
+			for _, p := range requested {
+				if !seen[p] {
+					seen[p] = true
+					paths = append(paths, p)
+				}
+			}
+		}
+	}
+	return paths, nil
 }

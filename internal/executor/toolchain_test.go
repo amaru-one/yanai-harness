@@ -59,34 +59,38 @@ func TestConfiguredToolChecks(t *testing.T) {
 			t.Fatal(result.ExitCode)
 		}
 	}
-	// Resolution rejects both direct and disguised control executables, plus tools
-	// under the writable repository/workspace even if the configuration is valid.
-	for _, name := range []string{"git", "bash", "pwsh", "rm", "GIT.EXE", "commit", "merge", "deploy", "destructive_db"} {
-		if workflow.ValidateCheckTool("tool", workflow.CheckTool{Binary: "/usr/bin/" + name}) == nil {
-			t.Fatal("accepted", name)
+	// Any installed program may be a check tool: the human approves each check
+	// command in the review. A tool still needs a simple name and an absolute,
+	// executable binary.
+	for _, name := range []string{"git", "bash", "docker", "rm"} {
+		if err := workflow.ValidateCheckTool(name, workflow.CheckTool{Binary: "/usr/bin/" + name}); err != nil {
+			t.Fatal(name, err)
 		}
 	}
-	alias := filepath.Join(t.TempDir(), "runner")
-	must(t, os.Symlink("/bin/sh", alias))
-	if _, err := n.resolveCheckTool("tool", workflow.CheckTool{Binary: alias}); err == nil {
-		t.Fatal("accepted shell alias")
+	if workflow.ValidateCheckTool("tool", workflow.CheckTool{Binary: "bin/tool"}) == nil {
+		t.Fatal("accepted a relative tool binary")
 	}
-	local := filepath.Join(o.Artifacts.Root, "runner")
-	must(t, os.WriteFile(local, []byte("#!/bin/sh\nexit 0\n"), 0700))
-	if _, err := n.resolveCheckTool("tool", workflow.CheckTool{Binary: local}); err == nil {
-		t.Fatal("accepted workspace executable")
+	if _, err := n.resolveCheckTool("tool", workflow.CheckTool{Binary: filepath.Join(o.Artifacts.Root, "missing")}); err == nil {
+		t.Fatal("accepted a missing binary")
 	}
-	localAlias := filepath.Join(o.Artifacts.Root, "runtime-alias")
-	must(t, os.Symlink(binary, localAlias))
-	if _, err := n.resolveCheckTool("tool", workflow.CheckTool{Binary: localAlias}); err == nil {
-		t.Fatal("accepted executable alias stored in workspace")
-	}
-	for _, args := range [][]string{{"unknown", "test"}, {"python", "deploy"}, {"python", "merge"}, {"python", "commit"}, {"python", "destructive_db"}} {
+	for _, args := range [][]string{{"unknown", "test"}, {"/abs/script.sh"}, {"../outside.sh"}} {
 		c := checks[0]
 		c.Args = args
-		if validateCheck(c, tools) == nil {
+		if validateCheck(c, tools) == nil && workflow.ValidateCheckArguments(args) == nil {
 			t.Fatal("accepted", args)
 		}
+	}
+	// A program the repository provides runs from its path inside the checkout.
+	must(t, os.WriteFile(filepath.Join(o.Repo.Path, "yanai-server", "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	script := workflow.Check{ID: "script", Args: []string{"./check.sh"}, Dir: "yanai-server", TimeoutSeconds: 10, Evidence: "exit_code"}
+	if err := validateCheck(script, tools); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.resolveRepositoryProgram("yanai-server", "./check.sh"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.resolveRepositoryProgram("yanai-server", "../../outside.sh"); err == nil {
+		t.Fatal("resolved a program outside the repository")
 	}
 	c := checks[0]
 	c.Evidence = ""

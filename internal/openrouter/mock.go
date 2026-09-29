@@ -3,6 +3,7 @@ package openrouter
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 )
@@ -102,10 +103,9 @@ func mockProposal(model string, in MockInput) map[string]any {
 		execution = map[string]any{}
 		cfg["execution"] = execution
 	}
-	execution["commit"] = true
-	// Choose like a parent must: rate the task "media", take the first catalog
-	// category (alphabetical) and its cheapest option that covers "media".
-	const complexity = "media"
+	// Choose like a parent must: rate the task "medium", take the first catalog
+	// category (alphabetical) and its cheapest option that covers "medium".
+	const complexity = "medium"
 	workerModel, category := model, ""
 	prices, _ := execution["prices"].(map[string]any)
 	cost := func(m string) float64 {
@@ -159,24 +159,26 @@ func mockProposal(model string, in MockInput) map[string]any {
 		}
 	}
 	role := "mock-worker"
-	agent := map[string]any{"id": role, "name": "Mock worker", "purpose": "Synthetic worker for YANAI_MOCK=1", "model": workerModel, "model_category": category, "temperature": 0.2, "max_tokens": 4000, "max_steps": 20, "prompt": in.PromptPathFor + role + ".md"}
-	cfg["agents"] = map[string]any{role: agent}
+	changes := map[string]any{"execution": map[string]any{"commit": true}}
+	if _, priced := prices[workerModel]; !priced {
+		changes["execution"].(map[string]any)["prices"] = map[string]any{workerModel: map[string]any{"input_usd_per_million": 1, "output_usd_per_million": 1}}
+	}
 	return map[string]any{
 		"summary": "Mock proposal (YANAI_MOCK=1): a single worker writes an example file.",
 		"worker": map[string]any{
 			"id": role, "name": "Mock worker", "purpose": "Synthetic worker for YANAI_MOCK=1", "model": workerModel,
 			"model_category": category, "model_reason": "The cheapest option in the first category covering medium difficulty (mock selection, YANAI_MOCK=1).",
 			"task_complexity": complexity, "complexity_reason": "One new file with tests (mock classification, YANAI_MOCK=1).",
-			"temperature": 0.2, "max_tokens": 4000, "max_steps": 20, "base_prompt": "",
+			"temperature": 0.2, "max_tokens": 32000, "max_steps": 20, "base_prompt": "",
 			"prompt": "You are a mock worker. Write the declared file, run the checks, and commit. Write prompts and Markdown in English.",
 		},
 		"task": map[string]any{
 			"id": "T-001", "title": in.Title, "description": in.Task, "criteria_ids": in.CriteriaIDs,
 			"criteria": []string{}, "outputs": []string{output}, "checks": checks, "max_attempts": 2,
 		},
-		"commit_scope": map[string]any{"scope": "mock", "module": output},
-		"config":       cfg,
-		"observations": []any{},
+		"commit_scope":   map[string]any{"scope": "mock", "module": output},
+		"config_changes": changes,
+		"observations":   []any{},
 	}
 }
 
@@ -214,7 +216,7 @@ func mockWorkerTurn(turn int, msgs []Message, in MockInput) Message {
 		output = in.Outputs[0]
 	}
 	if len(calls) == 0 {
-		return call(turn, "read_file", map[string]any{"paths": []string{output}})
+		return call(turn, "grep", map[string]any{"pattern": "mock", "ignore_case": true})
 	}
 	last := calls[len(calls)-1]
 	result := results[last.ID]
@@ -222,6 +224,15 @@ func mockWorkerTurn(turn int, msgs []Message, in MockInput) Message {
 		return call(turn, "finish", map[string]any{"result": "blocked", "explanation": "Simulated worker stopped: " + result.Error, "observations": []any{map[string]any{"description": "The simulated worker could not continue: " + result.Error, "requirement": "task", "question": "Adjust the configuration or ticket and approve again?"}}})
 	}
 	switch last.Function.Name {
+	case "grep":
+		// YANAI_MOCK_COMMAND=1 adds one human-approved command that writes a
+		// file, to exercise the approval pause and the adoption of its change.
+		if os.Getenv("YANAI_MOCK_COMMAND") == "1" {
+			return call(turn, "run_command", map[string]any{"args": []string{"sh", "-c", "printf 'written by an approved command\\n' > yanai-mock-command.txt"}, "reason": "Mock: write a file with a shell command (YANAI_MOCK_COMMAND=1)."})
+		}
+		return call(turn, "read_file", map[string]any{"paths": []string{output}})
+	case "run_command":
+		return call(turn, "read_file", map[string]any{"paths": []string{output}})
 	case "read_file":
 		content := fmt.Sprintf("# %s\n\nFile generated in mock mode (YANAI_MOCK=1).\n", in.Title)
 		args := map[string]any{"path": output, "content": content}

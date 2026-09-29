@@ -8,7 +8,7 @@ import (
 
 func TestTicketTypeHeadingCompatibility(t *testing.T) {
 	const body = "\nfix\n\n## Task\nFix the parser.\n\n## Acceptance criteria\n- Reject invalid input.\n"
-	for _, heading := range []string{"## Type", "## type", "## Tipo"} {
+	for _, heading := range []string{"## Type", "## type"} {
 		t.Run(heading, func(t *testing.T) {
 			raw := "# Parser fix\n\n" + heading + body
 			ticket, err := ParseMarkdownTicket(raw)

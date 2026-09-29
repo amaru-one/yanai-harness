@@ -26,10 +26,13 @@ go build -o yanai ./cmd/yanai
 
 New workspaces require an explicit target. `--repo` is resolved from the invocation
 directory; configured relative paths are resolved from the workspace. `module_dir`
-is an optional Go-specific validation setting, relative to the Git root. `--allow .` explicitly permits safe files throughout
-the repository; narrower paths restrict context and generated writes. Git internals,
-secrets, symlink escapes, and ignored files remain protected. The configured
-allowed paths enforce the project boundary. Fingerprints cover safe repository files independently of narrowed
+is an optional Go-specific validation setting, relative to the Git root. By
+default agents see the whole repository (`allowed_paths` `["."]`), including
+ordinary dotfiles such as `.github/` or `.gitignore`; narrower `--allow` paths
+restrict what they read and write. `.git`, environment files (`.env`,
+`.env.*`; `.env.example` and `.env.sample` are allowed), names suggesting
+secrets, credentials or private keys, key and database file types, symlinks, and
+ignored files are never readable or writable. Fingerprints cover safe repository files independently of narrowed
 context filters, plus the whole Git status and index.
 
 Review `yanai.config.json`: the orchestrator model and budget, allowed paths,
@@ -114,24 +117,32 @@ or writes the worker prompt from scratch into `prompts/generated/<slug>/<worker>
 
 Configure `orchestrator` in `yanai.config.json` (model, max tokens, max steps and a
 separate finite budget with price bounds). The parent runs with the settings
-captured when its cycle starts; its proposal can change any configuration, shown
-as a full diff at review, but cannot raise its own budget. `agents` starts empty.
+captured when its cycle starts. Its proposal carries `config_changes`, a JSON
+merge patch over the live configuration (`{}` for none), rather than a whole new
+file; the harness builds the single `agents` entry from the proposed worker. The
+result is shown as a full diff at review, and the proposal cannot raise the
+parent's budget or change the catalog. A rejected proposal lists every problem
+found, so one retry can fix them all. `agents` starts empty.
 
 The worker's model comes from the operator's `models` catalog. Each category (for
 example `engineering`, `database`) has a description and 1–5 options; each
 option names a model with an `execution.prices` bound, the task difficulties it
-handles (`baja`, `media`, `alta`), its `strengths` and, optionally, its
-`weaknesses` and `benchmarks` (figure plus source). Together a category's options
-must cover all three difficulties.
+handles (`low`, `medium`, `high`), its `context_tokens` (context window), its
+`strengths` and, optionally, its `weaknesses` and `reasoning_max_tokens`. Set the
+reasoning cap only for models that support one: when present it is sent as
+OpenRouter's `reasoning.max_tokens`; when absent the harness sends no reasoning
+setting. Together a category's options must cover all three difficulties. A
+worker's `max_tokens` must be at least 32,000, because reasoning models spend
+much of it thinking before they answer.
 
 The parent follows a fixed method: understand the project, analyze the ticket
 (reading the files it will touch), define the work, rate the difficulty, then choose
 the model. The difficulty rubric:
 
-- `baja` (low): 1–3 files in one module, an existing pattern to follow, no schema, public
+- `low`: 1–3 files in one module, an existing pattern to follow, no schema, public
   API, concurrency or security change.
-- `media` (medium): several files or two modules, moderate new logic, new tests.
-- `alta` (high): crosses modules; touches schema, migrations, contracts, concurrency,
+- `medium`: several files or two modules, moderate new logic, new tests.
+- `high`: crosses modules; touches schema, migrations, contracts, concurrency,
   security or sensitive data; ambiguous design or non-trivial algorithms. When in
   doubt, the higher level.
 
@@ -139,46 +150,40 @@ The parent declares `task_complexity` and `complexity_reason`, a `model_category
 and a model of that category that covers the difficulty. It should pick the cheapest
 such option unless a declared weakness matters for this ticket, and must explain in
 `model_reason` why it discarded every other option. It reasons only from the
-catalog, never from benchmark figures it remembers, and cannot change the catalog.
+catalog and cannot change it.
 Go rejects a model that does not cover the declared difficulty. Review shows the
 difficulty, every option with its price and coverage, and the reason, and warns
 when a cheaper option also covered the level. All of it is bound by the approval.
 
-Example (figures as published by September 2026; vendor-reported unless noted):
+Example (prices and context from OpenRouter, 2026-09-28):
 
 ```json
 "models": {
   "engineering": {
     "description": "Go/Svelte code, tests, refactoring",
     "options": [
-      {"model": "deepseek/deepseek-v4-pro", "difficulty": ["baja", "media", "alta"],
-       "strengths": "reasoning and code; long agent tasks; 1M-token context",
-       "weaknesses": "vendor figures only, no independent evaluation",
-       "benchmarks": "SWE-bench Verified 80.6%, LiveCodeBench 93.5%, Terminal-Bench 2.0 67.9% (DeepSeek, 2026-04)"},
-      {"model": "z-ai/glm-4.6", "difficulty": ["baja", "media"],
-       "strengths": "code and tool use; good value for the price",
-       "weaknesses": "2025 model; 200K-token context",
-       "benchmarks": "SWE-bench Verified 68.0% (Vals AI, independent); LiveCodeBench v6 82.8% (Z.ai)"},
-      {"model": "qwen/qwen3-coder-plus", "difficulty": ["baja", "media"],
-       "strengths": "coding agent with tool calling; 1M-token context",
-       "weaknesses": "expensive output; no figures specific to the Plus version",
-       "benchmarks": "SWE-bench Verified 69.6% for the open Qwen3-Coder-480B model (Qwen, 2025-07)"},
-      {"model": "moonshotai/kimi-k2.7-code", "difficulty": ["baja", "media"],
-       "strengths": "end-to-end programming tasks in long contexts (256K); 30% fewer reasoning tokens than K2.6",
-       "weaknesses": "expensive output; vendor figures only",
-       "benchmarks": "SWE-bench Verified 60.4% (Moonshot, 2026-06)"}
+      {"model": "z-ai/glm-5.3-flash", "difficulty": ["low", "medium"], "context_tokens": 1310720,
+       "strengths": "tool calling and reasoning; lowest price in the catalog"},
+      {"model": "deepseek/deepseek-v4.1-flash", "difficulty": ["low", "medium"], "context_tokens": 1048576,
+       "strengths": "tool calling and reasoning; low price"},
+      {"model": "deepseek/deepseek-v4-pro-0813", "difficulty": ["low", "medium", "high"], "context_tokens": 1048576,
+       "strengths": "tool calling and reasoning; flagship model at a low input price",
+       "weaknesses": "high output price"},
+      {"model": "z-ai/glm-5.3", "difficulty": ["low", "medium", "high"], "context_tokens": 1310720,
+       "strengths": "tool calling and reasoning; flagship model",
+       "weaknesses": "highest price in the catalog"}
     ]
   }
 }
 ```
 
-Matching `execution.prices` (USD per million tokens, OpenRouter, 2026-09):
+Matching `execution.prices` (USD per million tokens, OpenRouter, 2026-09-28):
 
 ```json
-"deepseek/deepseek-v4-pro":  {"input_usd_per_million": 0.348, "output_usd_per_million": 0.696},
-"z-ai/glm-4.6":              {"input_usd_per_million": 0.43,  "output_usd_per_million": 1.75},
-"qwen/qwen3-coder-plus":     {"input_usd_per_million": 0.65,  "output_usd_per_million": 3.25},
-"moonshotai/kimi-k2.7-code": {"input_usd_per_million": 0.656, "output_usd_per_million": 3.30}
+"z-ai/glm-5.3-flash":            {"input_usd_per_million": 0.15,  "output_usd_per_million": 0.50},
+"deepseek/deepseek-v4.1-flash":  {"input_usd_per_million": 0.30,  "output_usd_per_million": 1.20},
+"deepseek/deepseek-v4-pro-0813": {"input_usd_per_million": 0.395, "output_usd_per_million": 4.20},
+"z-ai/glm-5.3":                  {"input_usd_per_million": 1.40,  "output_usd_per_million": 4.40}
 ```
 
 ## Ticket cycle
@@ -199,7 +204,7 @@ export OPENROUTER_API_KEY=...
 ```
 
 Approval activates the proposed configuration (recoverably) and authorizes the
-worker to create the ticket branch from the approved base, write its owned files,
+worker to create the ticket branch from the approved base, write repository files,
 run approved checks, and commit — only after its required checks pass against the
 current files, with messages `<type>(<scope>): <summary>` plus `Yanai-Ticket` and
 `Yanai-Agent` trailers. Every model answer, tool intent and result, and every Git
@@ -212,8 +217,47 @@ checks pass against the final committed state), `no_change`, or `blocked` with
 observations; after human responses, `review`/`approve` confirm them under the same
 contract and `run` continues on the same branch.
 
-Agents read files in batches: `read_file` takes up to 10 paths per call, because
-every turn resends the whole conversation. Before each model call the harness
+Checks may run any command; the human approves each one in the review. A check
+names an installed program (`docker`, `npm`, `bash`, ...), which the harness
+resolves from `PATH` into `execution.tools` so the review shows the exact binary,
+or a repository script by relative path (`./scripts/smoke.sh`). Its `dir` is a
+repository directory (`.` is the root), evidence defaults to the exit code, and
+non-Go checks run with the operator's environment minus `OPENROUTER_API_KEY` and
+Git redirection variables (Go checks keep their isolated toolchain environment).
+
+Agents may also ask to run a command at any time with `run_command`. Every such
+command waits for a human: the run stops with the command, its directory and the
+agent's reason, and resumes at the same step after a decision.
+
+```sh
+./yanai command --ws W                                   # list requests
+./yanai command --ws W --id C-… --approve [--always]     # --always: same command, same dir, rest of the cycle
+./yanai command --ws W --id C-… --deny --note "use the approved check instead"
+./yanai run --ws W                                       # or: ./yanai plan --ws W ticket.md
+```
+
+A denial reaches the agent as an error with your note. A worker command that
+changes files hands them to the worker, who commits them with its own changes; a
+command that moves HEAD, changes the index or switches branch stops the run. A
+planning command must leave the repository unchanged. A command interrupted by a
+crash is never rerun automatically; the agent is told its outcome is unknown.
+`YANAI_MOCK_COMMAND=1` makes the mock worker request one command.
+
+The proposal's `outputs` are the files the parent expects the worker to change:
+the plan the human reviews, not a limit. The worker may change any other
+repository file the task needs (the protected files above excepted), commits
+every pending change, and explains extra files in its `finish` explanation.
+
+Agents search before they read: `grep` (an RE2 regular expression over the text
+files in scope, at most 200 matches) and `list_files` (paths and sizes under a
+directory or glob such as `deploy/**/*.yml`, at most 500) cost no model output
+and never show protected or ignored files. `read_file` takes up to 10 paths per
+call, because every turn resends the whole conversation, and
+`start_line`/`end_line` read a range of a large file. A replan after observations starts
+with the files earlier planning runs read, and the worker starts with its
+existing expected files and the files the parent read, each with its sha256, so
+neither pays read turns for them again. Workers change existing files with
+`edit_file` (one exact, unique replacement) instead of rewriting them whole. Before each model call the harness
 estimates the input from the provider's native token count for the previous turn
 (as OpenRouter reports it) plus a byte bound on what was added since; once a
 budget bucket has used more than 80% of its `max_tokens`, it first sends the same

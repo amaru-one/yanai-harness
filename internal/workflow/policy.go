@@ -17,7 +17,9 @@ type ModelPrice struct {
 	Output float64 `json:"output_usd_per_million"`
 }
 
-// CheckTool is an operator-installed executable, never a model-supplied command.
+// CheckTool is an installed executable a check runs by name. The harness
+// resolves a proposed check's program from PATH; the human approves the
+// resolved binary in the review.
 type CheckTool struct {
 	Binary string `json:"binary"`
 }
@@ -138,11 +140,11 @@ func (p ExecutionPolicy) Validate() error {
 			return fmt.Errorf("check %s postgres_url_var must name a required_env entry", c.ID)
 		}
 		if c.Args[0] != "go" {
-			if _, ok := p.Tools[c.Args[0]]; !ok {
-				return fmt.Errorf("check %s uses a tool not in execution.tools", c.ID)
-			}
 			if err := ValidateCheckArguments(c.Args); err != nil {
-				return err
+				return fmt.Errorf("check %s: %w", c.ID, err)
+			}
+			if _, ok := p.Tools[c.Args[0]]; !ok && !RepositoryProgram(c.Args[0]) {
+				return fmt.Errorf("check %s runs %q, which is neither in execution.tools nor found on PATH", c.ID, c.Args[0])
 			}
 		}
 		seen[c.ID] = true
@@ -174,32 +176,34 @@ func (p ExecutionPolicy) ReserveCost(model string, input, output int64) (float64
 	return cost, nil
 }
 
-// Direct shell, repository-control and destructive commands are unavailable.
-// Configured runtimes still execute trusted project code; this is not a sandbox.
-func ForbiddenCheckProgram(name string) bool {
-	switch strings.TrimSuffix(strings.ToLower(filepath.Base(name)), ".exe") {
-	case "commit", "merge", "deploy", "destructive_db", "git", "sh", "bash", "dash", "zsh", "fish", "cmd", "powershell", "pwsh", "sudo", "doas", "env", "xargs", "rm", "rmdir", "mv", "cp", "dd", "chmod", "chown":
-		return true
-	}
-	return false
-}
+// Checks may run any program: the human approves every check command in the
+// review, and that approval is the gate. Checks execute project code; this is
+// not a sandbox. A tool is a simple name bound to an absolute executable.
 func ValidateCheckTool(name string, tool CheckTool) error {
-	if !regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`).MatchString(name) || name == "go" || ForbiddenCheckProgram(name) || !filepath.IsAbs(tool.Binary) || strings.ContainsAny(tool.Binary, "\x00\r\n") || ForbiddenCheckProgram(tool.Binary) {
-		return fmt.Errorf("invalid or forbidden check tool %q", name)
+	if !regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.+-]*$`).MatchString(name) || name == "go" || !filepath.IsAbs(tool.Binary) || strings.ContainsAny(tool.Binary, "\x00\r\n") {
+		return fmt.Errorf("invalid check tool %q: a name of letters, digits, '.', '_', '+' or '-' bound to an absolute binary path", name)
 	}
 	return nil
 }
+
+// RepositoryProgram reports whether a check runs a program the repository
+// itself provides (a relative path such as ./scripts/smoke.sh) rather than a
+// tool installed on the machine.
+func RepositoryProgram(program string) bool { return strings.Contains(program, "/") }
+
 func ValidateCheckArguments(args []string) error {
-	if len(args) == 0 || ForbiddenCheckProgram(args[0]) {
-		return fmt.Errorf("forbidden check command")
+	if len(args) == 0 || args[0] == "" {
+		return fmt.Errorf("check command is empty")
 	}
 	for _, arg := range args {
 		if strings.ContainsRune(arg, 0) {
 			return fmt.Errorf("NUL in check argument")
 		}
-		switch strings.ToLower(arg) {
-		case "commit", "merge", "deploy", "destructive_db":
-			return fmt.Errorf("check action %q is unavailable", arg)
+	}
+	if RepositoryProgram(args[0]) {
+		clean := filepath.ToSlash(filepath.Clean(args[0]))
+		if filepath.IsAbs(args[0]) || clean == ".." || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("check program %q must be a program name found on PATH or a relative path inside the repository", args[0])
 		}
 	}
 	return nil

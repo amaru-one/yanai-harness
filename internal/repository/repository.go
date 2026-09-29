@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/yanai/yanai-harness/internal/config"
@@ -205,9 +206,42 @@ func cleanRelative(path string) error {
 	return nil
 }
 
-// CheckPath is shared by the index, explicit reads and generated output paths.
-// Configuration can narrow the backend boundary, never widen it into the UI.
+// protectedName reports a path segment agents must never read or write:
+// Git's own directory, environment files (an example or sample is fine) and
+// names that suggest credentials or private keys. Other dotfiles such as
+// .github or .gitignore are ordinary repository files.
+func protectedName(lower string) bool {
+	switch {
+	case lower == ".git":
+		return true
+	case lower == ".env" || strings.HasPrefix(lower, ".env."):
+		return lower != ".env.example" && lower != ".env.sample"
+	case strings.HasPrefix(lower, "secret"), strings.Contains(lower, "credential"), strings.HasPrefix(lower, "id_rsa"), strings.HasPrefix(lower, "id_ed25519"):
+		return true
+	}
+	return false
+}
+
+// CheckPath is shared by the index, explicit reads, searches and writes.
+// Configuration can narrow the boundary with repo.allowed_paths; by default
+// the whole repository is in scope except protected and ignored files.
 func (t *Target) CheckPath(path string) error {
+	if err := t.checkName(path); err != nil {
+		return err
+	}
+	if _, err := t.git("check-ignore", "--quiet", "--no-index", "--", path); err != nil {
+		if e, ok := err.(*exec.ExitError); !ok || e.ExitCode() != 1 {
+			return fmt.Errorf("check ignored path: %w", err)
+		}
+	} else {
+		return fmt.Errorf("ignored path: %q", path)
+	}
+	return t.noSymlinks(path)
+}
+
+// checkName applies every rule that depends only on the path itself: clean
+// and relative, inside repo.allowed_paths, not excluded, not protected.
+func (t *Target) checkName(path string) error {
 	if err := cleanRelative(path); err != nil {
 		return err
 	}
@@ -218,11 +252,11 @@ func (t *Target) CheckPath(path string) error {
 		}
 	}
 	if !allowed {
-		return fmt.Errorf("path outside allowed backend paths: %q", path)
+		return fmt.Errorf("path outside repo.allowed_paths: %q", path)
 	}
 	for _, part := range strings.Split(path, "/") {
 		lower := strings.ToLower(part)
-		if strings.HasPrefix(part, ".") || lower == "secrets" || strings.Contains(lower, "credential") || strings.HasPrefix(lower, "secret") || strings.HasPrefix(lower, "id_rsa") || strings.HasPrefix(lower, "id_ed25519") {
+		if protectedName(lower) {
 			return fmt.Errorf("protected path: %q", path)
 		}
 		for _, excluded := range t.repo.ExcludeDirs {
@@ -235,14 +269,33 @@ func (t *Target) CheckPath(path string) error {
 	case ".env", ".pem", ".key", ".p12", ".pfx", ".sqlite", ".db":
 		return fmt.Errorf("protected file type: %q", path)
 	}
-	if _, err := t.git("check-ignore", "--quiet", "--no-index", "--", path); err != nil {
-		if e, ok := err.(*exec.ExitError); !ok || e.ExitCode() != 1 {
-			return fmt.Errorf("check ignored path: %w", err)
-		}
-	} else {
-		return fmt.Errorf("ignored path: %q", path)
+	return nil
+}
+
+// Files lists every readable file in scope: tracked files plus untracked
+// ones Git does not ignore, filtered by the same rules as CheckPath. It asks
+// Git once instead of walking the tree, so ignored directories such as
+// node_modules cost nothing.
+func (t *Target) Files() ([]string, error) {
+	names, err := t.git("ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, err
 	}
-	return t.noSymlinks(path)
+	seen := map[string]bool{}
+	var out []string
+	for _, path := range strings.Split(names, "\x00") {
+		if path == "" || seen[path] || t.checkName(path) != nil {
+			continue
+		}
+		seen[path] = true
+		info, err := os.Lstat(filepath.Join(t.Root, filepath.FromSlash(path)))
+		if err != nil || !info.Mode().IsRegular() {
+			continue // deleted in the worktree, a symlink, or not a file
+		}
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (t *Target) noSymlinks(path string) error {

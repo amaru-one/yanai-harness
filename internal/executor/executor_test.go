@@ -167,7 +167,6 @@ func TestNativeRejectsUnsafeInputs(t *testing.T) {
 		edit Edit
 	}{
 		{"truncated", Edit{"yanai-server/a.go", source("package"), source("replacement")}},
-		{"undeclared", Edit{"yanai-server/other.go", nil, source("bad")}},
 		{"escape", Edit{"../outside", nil, source("bad")}},
 		{"ui", Edit{"yanai-ui/a.go", nil, source("bad")}},
 		{"secret", Edit{"yanai-server/secret.txt", nil, source("bad")}},
@@ -179,6 +178,11 @@ func TestNativeRejectsUnsafeInputs(t *testing.T) {
 				t.Fatal("unsafe edit accepted")
 			}
 		})
+	}
+	// Outputs describe the plan; any other file inside the ticket's allowed
+	// paths may be written too.
+	if _, err := n.Apply("T-1", []Edit{{"yanai-server/other.go", nil, source("package sample\n")}}); err != nil {
+		t.Fatalf("file outside the planned outputs rejected: %v", err)
 	}
 	// Internal as well as escaping symlinks are refused at the actual I/O layer.
 	for _, dest := range []string{t.TempDir(), "yanai-server"} {

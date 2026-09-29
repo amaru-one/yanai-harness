@@ -127,14 +127,23 @@ type request struct {
 	Tools             []Tool          `json:"tools,omitempty"`
 	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	Reasoning         json.RawMessage `json:"reasoning,omitempty"`
+	Provider          *providerPrefs  `json:"provider,omitempty"`
 	// probe asks only for the prompt's token count: a cut at max_tokens or an
 	// empty answer is the expected outcome, not an error.
 	probe bool
 }
 
+// providerPrefs is OpenRouter's provider routing object; Ignore skips the
+// named upstream providers for this request.
+type providerPrefs struct {
+	Ignore []string `json:"ignore,omitempty"`
+}
+
 type response struct {
-	ID      string `json:"id"`
-	Choices []struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Choices  []struct {
 		Message      Message `json:"message"`
 		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
@@ -170,39 +179,48 @@ func (c *Client) Chat(ctx context.Context, model string, msgs []Message, temp fl
 // may contain text, tool calls, or both. Parallel tool calls are disabled:
 // the harness executes exactly one tool per turn. A non-empty force makes
 // the model call that one tool.
-func (c *Client) ChatTools(ctx context.Context, model string, msgs []Message, tools []Tool, force string, temp float64, maxTokens int, o Observer) (Message, Usage, error) {
-	return c.send(ctx, toolRequest(model, msgs, tools, force, temp, maxTokens), o)
+func (c *Client) ChatTools(ctx context.Context, model string, msgs []Message, tools []Tool, force string, reasoning int, temp float64, maxTokens int, o Observer) (Message, Usage, error) {
+	return c.send(ctx, toolRequest(model, msgs, tools, force, reasoning, temp, maxTokens), o)
 }
 
 // ProbePromptTokens sends the request ChatTools would send, capped at one
 // output token, and returns the provider's native usage. It is a paid call
 // whose only product is the exact prompt token count.
 func (c *Client) ProbePromptTokens(ctx context.Context, model string, msgs []Message, tools []Tool, force string, temp float64, o Observer) (Usage, error) {
-	r := toolRequest(model, msgs, tools, force, temp, 1)
+	r := toolRequest(model, msgs, tools, force, 0, temp, 1)
 	r.probe = true
 	_, usage, err := c.send(ctx, r, o)
 	return usage, err
 }
 
-func toolRequest(model string, msgs []Message, tools []Tool, force string, temp float64, maxTokens int) request {
+// toolRequest builds a tool-loop request. A positive reasoning caps the
+// model's reasoning tokens; zero sends no reasoning setting at all, so a
+// hybrid model is never switched into thinking by the harness.
+func toolRequest(model string, msgs []Message, tools []Tool, force string, reasoning int, temp float64, maxTokens int) request {
 	parallel := false
 	choice := json.RawMessage(`"auto"`)
 	if force != "" {
 		choice, _ = json.Marshal(map[string]any{"type": "function", "function": map[string]string{"name": force}})
 	}
-	return request{Model: model, Messages: msgs, Temperature: temp, MaxTokens: maxTokens, Tools: tools, ToolChoice: choice, ParallelToolCalls: &parallel}
+	r := request{Model: model, Messages: msgs, Temperature: temp, MaxTokens: maxTokens, Tools: tools, ToolChoice: choice, ParallelToolCalls: &parallel}
+	if reasoning > 0 {
+		r.Reasoning, _ = json.Marshal(map[string]int{"max_tokens": reasoning})
+	}
+	return r
 }
 
 func (c *Client) send(ctx context.Context, r request, o Observer) (Message, Usage, error) {
 	if o.Before == nil || o.After == nil {
 		return Message{}, Usage{}, fmt.Errorf("provider requests require accounting hooks")
 	}
-	body, err := json.Marshal(r)
-	if err != nil {
-		return Message{}, Usage{}, err
-	}
 	model, msgs, tools := r.Model, r.Messages, r.Tools
 	for attempt := 0; attempt <= c.retries; attempt++ {
+		// The body is rebuilt per attempt: a retry may exclude a provider that
+		// failed the previous one.
+		body, err := json.Marshal(r)
+		if err != nil {
+			return Message{}, Usage{}, err
+		}
 		if attempt > 0 {
 			wait := time.Duration(1<<min(attempt, 6))*time.Second + time.Duration(rand.Intn(500))*time.Millisecond
 			select {
@@ -288,7 +306,18 @@ func (c *Client) send(ctx context.Context, r request, o Observer) (Message, Usag
 					case result.FinishReason == "length":
 						result.Err = fmt.Errorf("openrouter response was truncated at the token limit")
 					case result.Text == "" && len(result.Message.ToolCalls) == 0:
-						result.Err = fmt.Errorf("the model returned empty text")
+						// An upstream that drops its stream mid-answer ends with an
+						// empty message (finish_reason "error" or none). OpenRouter
+						// does not bill it, so the request is retried on another
+						// provider.
+						result.Err = fmt.Errorf("the model returned empty text (provider %s, finish_reason %q)", orUnknown(parsed.Provider), result.FinishReason)
+						retry = true
+						if parsed.Provider != "" && len(r.Tools) > 0 {
+							if r.Provider == nil {
+								r.Provider = &providerPrefs{}
+							}
+							r.Provider.Ignore = append(r.Provider.Ignore, parsed.Provider)
+						}
 					}
 				}
 			}
@@ -306,6 +335,13 @@ func (c *Client) send(ctx context.Context, r request, o Observer) (Message, Usag
 		}
 	}
 	return Message{}, Usage{}, fmt.Errorf("retry limit exhausted")
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }
 
 func truncate(s string, n int) string {

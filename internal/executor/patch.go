@@ -173,19 +173,8 @@ func (n *Native) validateEdits(ticket string, edits []Edit) error {
 		if err := n.target.CheckPath(e.Path); err != nil {
 			return err
 		}
-		output, within := false, false
-		for _, p := range approved.Outputs {
-			if p == e.Path {
-				output = true
-			}
-		}
-		for _, p := range approved.AllowedPaths {
-			if p == e.Path || strings.HasPrefix(e.Path, p+"/") {
-				within = true
-			}
-		}
-		if !output || !within {
-			return fmt.Errorf("undeclared output: %s", e.Path)
+		if !approved.Allows(e.Path) {
+			return fmt.Errorf("path outside the approved ticket: %s", e.Path)
 		}
 		for _, f := range []*File{e.Before, e.After} {
 			if f != nil {

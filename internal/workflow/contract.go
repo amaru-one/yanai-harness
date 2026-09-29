@@ -21,7 +21,7 @@ import (
 const ContractVersion = 5
 
 // ToolProtocolVersion names the worker tool interface bound by approval.
-const ToolProtocolVersion = "level0-tools-v2"
+const ToolProtocolVersion = "level0-tools-v4"
 
 // ExecutionBackendNative and CandidateSchemaVersion are the only values this
 // binary can execute. They are part of the contract (and therefore of its
@@ -84,13 +84,15 @@ type WorkerTerms struct {
 // ModelOptionTerms is one catalog option exactly as the parent saw it,
 // including its price bounds in USD per million tokens.
 type ModelOptionTerms struct {
-	Model      string   `json:"model"`
-	Difficulty []string `json:"difficulty"`
-	Strengths  string   `json:"strengths"`
-	Weaknesses string   `json:"weaknesses,omitempty"`
-	Benchmarks string   `json:"benchmarks,omitempty"`
-	InputUSD   float64  `json:"input_usd_per_million"`
-	OutputUSD  float64  `json:"output_usd_per_million"`
+	Model         string   `json:"model"`
+	Difficulty    []string `json:"difficulty"`
+	Strengths     string   `json:"strengths"`
+	Weaknesses    string   `json:"weaknesses,omitempty"`
+	ContextTokens int      `json:"context_tokens"`
+	// ReasoningMaxTokens is the approved per-call reasoning cap (0: none).
+	ReasoningMaxTokens int     `json:"reasoning_max_tokens,omitempty"`
+	InputUSD           float64 `json:"input_usd_per_million"`
+	OutputUSD          float64 `json:"output_usd_per_million"`
 }
 
 // LevelZeroTerms are the approval terms specific to a parent-led cycle. The
@@ -381,19 +383,7 @@ func (s *Store) PreparePatch(cycle int, hash, ticket string, next RepositoryStat
 		if bok == aok && before == after {
 			continue
 		}
-		allowed := false
-		for _, out := range approved.Outputs {
-			if p == out {
-				allowed = true
-			}
-		}
-		within := false
-		for _, prefix := range approved.AllowedPaths {
-			if p == prefix || strings.HasPrefix(p, prefix+"/") {
-				within = true
-			}
-		}
-		if !allowed || !within {
+		if !approved.Allows(p) {
 			return fmt.Errorf("patch path outside approved ticket: %s", p)
 		}
 		delta[p] = [2]string{before, after}
@@ -456,6 +446,49 @@ func (s *Store) ReconcilePatch(cycle int, hash string, actual RepositoryState) e
 		return err
 	}
 	if err = s.appendEventTx(tx, Event{Cycle: cycle, Actor: ActorEngine, Type: "patch.reconciled", Payload: digest}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Allows reports whether the ticket may change path. A ticket approved with
+// allowed path "." may change any repository file (the path rules of the
+// target still apply); older contracts listed their exact outputs there.
+func (t Ticket) Allows(path string) bool {
+	for _, prefix := range t.AllowedPaths {
+		if prefix == "." || path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// AdoptCommandState records the repository state a human-approved command
+// left behind as the engine's own, so later guards accept it and the worker
+// can commit it. The command may change file contents only: the checkout,
+// HEAD and index must be unchanged, and no patch may be in flight.
+func (s *Store) AdoptCommandState(cycle int, hash string, before, after RepositoryState, command string) error {
+	if before.Root != after.Root || before.CommonDir != after.CommonDir || before.Head != after.Head || before.IndexHash != after.IndexHash {
+		return errors.New("command " + command + " changed HEAD, the index or the checkout; only file contents may change")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var current, post string
+	if err = tx.QueryRow(`SELECT current_hash,post_hash FROM workflow_patch_states WHERE project=? AND cycle=? AND contract_hash=?`, s.project, cycle, hash).Scan(&current, &post); err != nil {
+		return err
+	}
+	if post != "" || current != before.Baseline() {
+		return errors.New("the recorded state changed while command " + command + " ran")
+	}
+	digest := after.Baseline()
+	raw, _ := json.Marshal(after)
+	if _, err = tx.Exec(`UPDATE workflow_patch_states SET current_hash=?,current_json=?,revision=revision+1 WHERE project=? AND cycle=? AND contract_hash=?`, digest, string(raw), s.project, cycle, hash); err != nil {
+		return err
+	}
+	if err = s.appendEventTx(tx, Event{Cycle: cycle, Actor: ActorEngine, Type: "patch.command", Payload: command + " " + digest}); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -36,6 +36,8 @@ COMMANDS
   init --repo PATH [--module-dir DIR] [--allow paths]  Bind an explicit Git repository
   plan [--retry-unresolved] <ticket.md>               The parent proposes one worker and one task
   resolve --observation ID --note "..."               Record a human response
+  command [--id C-ID --approve [--always] | --deny --note "..."]
+                                                     List, approve or deny commands agents asked to run
   status [--json] [--attempts]                        Show cycle, worker, branch, budgets, observations
   review                                             Show the proposal (or the final report) and its token
   approve --contract TOKEN [--note "..."]              The single human execution approval
@@ -86,6 +88,8 @@ func run() error {
 		return cmdPlan(args)
 	case "resolve":
 		return cmdResolve(args)
+	case "command":
+		return cmdCommand(args)
 	case "status":
 		return cmdStatus(args)
 	case "review":
@@ -485,6 +489,14 @@ func cmdStatus(args []string) error {
 		}
 		for _, o := range observations {
 			fmt.Printf("Observation %s (%s): %s\n  Requirement: %s\n  Question: %s\n  Human response: %s\n", o.ID, o.Role, o.Detail.Description, o.Detail.Requirement, o.Detail.Question, o.Resolution)
+		}
+		pending, e := w.Store.PendingCommands(st.Cycle)
+		if e != nil {
+			return e
+		}
+		for _, c := range pending {
+			printCommandRequest(c)
+			fmt.Printf("  Decide: yanai command --id %s --approve [--always] | --deny --note \"...\"\n", c.ID)
 		}
 	}
 	fmt.Printf("Folder:  %s\n", w.CycleDir(st.Cycle))
