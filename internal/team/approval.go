@@ -292,7 +292,7 @@ func (r *Runner) renderReview(st *ws.State, c workflow.ExecutionContract, files 
 	for _, cr := range t.Criteria {
 		fmt.Fprintf(&b, "  - %s\n", cr)
 	}
-	fmt.Fprintf(&b, "Owned paths (the only files the worker may create, change or delete):\n")
+	fmt.Fprintf(&b, "Expected files (the plan; the worker may change other repository files when needed):\n")
 	for _, p := range t.Outputs {
 		fmt.Fprintf(&b, "  - %s\n", p)
 	}

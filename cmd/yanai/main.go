@@ -40,6 +40,8 @@ COMMANDS
                                                      List, approve or deny commands agents asked to run
   status [--json] [--attempts]                        Show cycle, worker, branch, budgets, observations
   review                                             Show the proposal (or the final report) and its token
+  amend [--drop-output PATH]... [--prompt FILE] --note "..."
+                                                     Correct the proposal awaiting approval without replanning
   approve --contract TOKEN [--note "..."]              The single human execution approval
   reject --note "..."                                 Reject a proposal
   invalidate --note "..."                             Revoke approval
@@ -90,6 +92,8 @@ func run() error {
 		return cmdResolve(args)
 	case "command":
 		return cmdCommand(args)
+	case "amend":
+		return cmdAmend(args)
 	case "status":
 		return cmdStatus(args)
 	case "review":

@@ -243,6 +243,12 @@ planning command must leave the repository unchanged. A command interrupted by a
 crash is never rerun automatically; the agent is told its outcome is unknown.
 `YANAI_MOCK_COMMAND=1` makes the mock worker request one command.
 
+A proposal awaiting approval can be corrected by the human without asking the
+parent again: `yanai amend --drop-output PATH --prompt FILE --note "why"`
+removes expected files and/or replaces the worker prompt. The result passes the
+same validation against the same planning inputs, is published as a new revision
+beside the parent's (which stays as evidence), and needs a new review and approval.
+
 The proposal's `outputs` are the files the parent expects the worker to change:
 the plan the human reviews, not a limit. The worker may change any other
 repository file the task needs (the protected files above excepted), commits

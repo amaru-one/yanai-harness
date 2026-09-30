@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/yanai/yanai-harness/internal/team"
 	"github.com/yanai/yanai-harness/internal/workflow"
 )
 
@@ -131,4 +132,41 @@ func printCommandRequest(c workflow.CommandRequest) {
 	if c.Note != "" {
 		fmt.Printf("  Note: %s\n", c.Note)
 	}
+}
+
+// repeated collects a flag given several times.
+type repeated []string
+
+func (r *repeated) String() string     { return strings.Join(*r, ",") }
+func (r *repeated) Set(v string) error { *r = append(*r, v); return nil }
+
+func cmdAmend(args []string) error {
+	fs := flag.NewFlagSet("amend", flag.ContinueOnError)
+	path := wsPath(fs)
+	var drop repeated
+	fs.Var(&drop, "drop-output", "remove an expected file from the task (repeatable)")
+	promptFile := fs.String("prompt", "", "file whose content replaces the worker prompt")
+	note := fs.String("note", "", "why the proposal is amended")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	amendment := team.Amendment{DropOutputs: drop, Note: *note}
+	if *promptFile != "" {
+		data, err := os.ReadFile(*promptFile)
+		if err != nil {
+			return err
+		}
+		amendment.Prompt = string(data)
+	}
+	r, cleanup, err := bindWorkspace(*path)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	st, err := r.Amend(amendment)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Cycle %03d: proposal amended; it needs a new review and approval.\nNext: yanai review, then yanai approve --contract TOKEN\n", st.Cycle)
+	return nil
 }

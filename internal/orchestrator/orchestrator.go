@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -174,6 +175,7 @@ Level 0 rules:
 - commit_scope: Conventional Commits scope (lowercase letters, digits, hyphens) and the module path it represents according to alcance.md; all outputs must be within that module ("." is the root).
 - worker.max_tokens: at least 32000. It counts the model's reasoning as well as its answer; a lower limit cuts turns off before the tool call.
 - task.max_attempts: at least 5 for high difficulty. Every round of edits after a failed check uses one, including a round that only fixes a compile error.
+- yanai.config.json is the harness's own workspace file, not part of the target repository: do not look for it with read_file, grep or list_files (its current content is in your input). It changes only through config_changes. The task, its outputs and the worker prompt must never ask the worker to create or edit it, for example to add a check.
 - config_changes: ONLY the changes to the current yanai.config.json, as a JSON merge patch (nested objects merge, null removes a key). Use {} when nothing changes. Do not include "agents": the harness builds the worker entry from your worker object. The resulting configuration must have execution.commit=true, finite budgets, at least one check, and an execution.prices entry for the worker model. You cannot change "models" or increase orchestrator.budget. The human will see the complete diff.
 - If information is missing, a conflict exists, or you need an undeclared variable, tool, or library, return observations (the cycle will pause for the human). Human responses do not expand the ticket. Never repeat a question already answered under "Previous observations and human responses"; apply that answer instead.
 - Files listed under "Files you already read in this cycle" are current; do not read them again. read_file accepts up to 10 paths per call (bounded reads; start_line/end_line read a range of a large file). Search with grep or list_files before reading. Every turn resends the whole conversation, so request all the files you need in as few calls as possible instead of one file per turn. ALWAYS finish by calling submit_proposal exactly once. Use exactly one tool per turn. If the harness says only submit_proposal is available, call it with what you have.
@@ -567,7 +569,7 @@ func Validate(p Proposal, c Context, workspace string, open func(config.Repo) (C
 		}
 	}
 	if len(t.Outputs) == 0 || len(t.Outputs) > 128 {
-		fail("task needs between 1 and 128 owned output paths")
+		fail("task needs between 1 and 128 expected output paths")
 	}
 	scope := p.CommitScope
 	if !scopePattern.MatchString(scope.Scope) {
@@ -643,6 +645,9 @@ func Validate(p Proposal, c Context, workspace string, open func(config.Repo) (C
 		if err := checker.CheckPath(out); err != nil {
 			errs = append(errs, err)
 		}
+		if harnessConfigOutput(out, cfg.Repo.Path) {
+			fail("output %s is the harness's own workspace configuration, not a repository file: change checks, tools and budgets through config_changes, and do not list it in outputs or ask the worker to edit it", out)
+		}
 	}
 	approved := map[string]bool{}
 	for _, check := range cfg.Execution.Checks {
@@ -715,6 +720,17 @@ func mergedConfig(live, changes json.RawMessage, agent config.Agent) ([]byte, er
 		return nil, err
 	}
 	return append(out, '\n'), nil
+}
+
+// harnessConfigOutput reports an output naming the harness's configuration
+// file (yanai.config.json) that the target repository does not itself have:
+// the parent confusing the workspace with the repository.
+func harnessConfigOutput(out, repoRoot string) bool {
+	if path.Base(out) != "yanai.config.json" {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(out)))
+	return err != nil
 }
 
 // lookPath finds a check program on the operator's PATH; tests replace it.

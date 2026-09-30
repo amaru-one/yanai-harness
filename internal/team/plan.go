@@ -353,13 +353,24 @@ func (r *Runner) checkWorkerBudget(cycle int, p workflow.ExecutionPolicy) error 
 // Nothing in the target repository changes, and the live configuration is
 // untouched until a human approves.
 func (r *Runner) acceptProposal(st *ws.State, p orchestrator.Proposal, v orchestrator.Validated, pc orchestrator.Context, id string) (*ws.State, error) {
+	return r.recordProposal(st, p, v, pc, id, 1, "parent proposed one worker", parentRole)
+}
+
+// recordProposal publishes a validated proposal as the cycle's plan awaiting
+// approval. Revision 1 is the parent's; a human amendment publishes revision
+// n under new artifact IDs and keeps every earlier revision as evidence.
+func (r *Runner) recordProposal(st *ws.State, p orchestrator.Proposal, v orchestrator.Validated, pc orchestrator.Context, id string, revision int, event, actor string) (*ws.State, error) {
 	store := r.Workspace.Store
 	artifacts := workflow.ArtifactStore{Root: r.Workspace.Root}
-	promptRef, err := artifacts.Publish(store, st.Cycle, workflow.ArtifactRef{ID: "proposal-prompt", Path: fmt.Sprintf("cycles/%03d/proposal/%s.md", st.Cycle, v.Worker.ID), Version: workflow.Digest(p.Worker.Prompt), Media: "text/markdown"}, []byte(p.Worker.Prompt))
+	suffix, dir := "", fmt.Sprintf("cycles/%03d/proposal", st.Cycle)
+	if revision > 1 {
+		suffix, dir = fmt.Sprintf("-r%d", revision), fmt.Sprintf("cycles/%03d/proposal/r%d", st.Cycle, revision)
+	}
+	promptRef, err := artifacts.Publish(store, st.Cycle, workflow.ArtifactRef{ID: "proposal-prompt" + suffix, Path: fmt.Sprintf("%s/%s.md", dir, v.Worker.ID), Version: workflow.Digest(p.Worker.Prompt), Media: "text/markdown"}, []byte(p.Worker.Prompt))
 	if err != nil {
 		return st, err
 	}
-	configRef, err := artifacts.Publish(store, st.Cycle, workflow.ArtifactRef{ID: "proposal-config", Path: fmt.Sprintf("cycles/%03d/proposal/yanai.config.json", st.Cycle), Version: workflow.Digest(string(v.ConfigBytes)), Media: "application/json"}, v.ConfigBytes)
+	configRef, err := artifacts.Publish(store, st.Cycle, workflow.ArtifactRef{ID: "proposal-config" + suffix, Path: fmt.Sprintf("%s/yanai.config.json", dir), Version: workflow.Digest(string(v.ConfigBytes)), Media: "application/json"}, v.ConfigBytes)
 	if err != nil {
 		return st, err
 	}
@@ -368,6 +379,7 @@ func (r *Runner) acceptProposal(st *ws.State, p orchestrator.Proposal, v orchest
 	}
 	task := v.Task
 	task.BaseCommit = st.BaseCommit
+	task.Revision = revision
 	plan := workflow.Proposal{SchemaVersion: "1", ID: "ticket-plan", Outcome: workflow.OutcomeProposeChange, Origin: workflow.MarkdownOrigin, Summary: p.Summary, Inputs: []workflow.ArtifactRef{st.Markdown.Source}, Tickets: []workflow.Ticket{task}}
 	if _, err = store.SaveTicket(st.Cycle, task); err != nil {
 		return st, err
@@ -388,7 +400,7 @@ func (r *Runner) acceptProposal(st *ws.State, p orchestrator.Proposal, v orchest
 		return st, err
 	}
 	st.Phase = ws.PhaseWaiting
-	st.Log("parent proposed one worker", parentRole, v.Worker.ID)
+	st.Log(event, actor, v.Worker.ID)
 	return st, r.Workspace.SaveState(st, workflow.ActorEngine)
 }
 

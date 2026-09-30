@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -110,5 +112,22 @@ func TestResolveCheckToolsBindsProgramsFromPath(t *testing.T) {
 	evidence := func(i int) any { return checks[i].(map[string]any)["evidence"] }
 	if evidence(0) != "exit_code" || evidence(1) != "output" || evidence(2) != nil {
 		t.Fatalf("evidence = %v %v %v; want exit_code default, explicit output kept, none for go", evidence(0), evidence(1), evidence(2))
+	}
+}
+
+func TestHarnessConfigIsNotARepositoryOutput(t *testing.T) {
+	repo := t.TempDir()
+	if !harnessConfigOutput("yanai.config.json", repo) {
+		t.Fatal("the workspace config was accepted as a repository output")
+	}
+	if harnessConfigOutput("docker-compose.local.yml", repo) {
+		t.Fatal("an ordinary output was rejected")
+	}
+	// A repository that really has such a file may change it.
+	if err := os.WriteFile(filepath.Join(repo, "yanai.config.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if harnessConfigOutput("yanai.config.json", repo) {
+		t.Fatal("an existing repository file was rejected")
 	}
 }
