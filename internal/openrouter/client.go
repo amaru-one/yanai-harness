@@ -100,10 +100,10 @@ func New(c *config.Config) (*Client, error) {
 	mock := os.Getenv("YANAI_MOCK") == "1"
 	key := c.APIKey()
 	if key == "" && !mock {
-		return nil, fmt.Errorf("missing the environment variable %s with your OpenRouter key\n"+
-			"  export %s=sk-or-...\n"+
+		return nil, fmt.Errorf("missing your OpenRouter key: set %s in the environment or in one of these .env files: %s\n"+
+			"  %s=sk-or-...\n"+
 			"  (or use YANAI_MOCK=1 to test the flow without calling the API)",
-			c.OpenRouter.APIKeyEnv, c.OpenRouter.APIKeyEnv)
+			c.OpenRouter.APIKeyEnv, strings.Join(c.KeySources(), ", "), c.OpenRouter.APIKeyEnv)
 	}
 	return &Client{
 		baseURL: strings.TrimRight(c.OpenRouter.BaseURL, "/"),

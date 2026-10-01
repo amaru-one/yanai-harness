@@ -112,6 +112,9 @@ type Context struct {
 	// from the unchanged baseline. They are derived from recorded steps, so
 	// they are not part of the input hash.
 	AlreadyRead []ws.Document
+	// Host describes the machine commands run on. Like AlreadyRead it is
+	// context, not an input: it is not hashed.
+	Host string
 }
 
 // Hashes returns the digest of every planning input by name.
@@ -217,6 +220,7 @@ func PlanningMessage(c Context, promptPathFor string) (string, error) {
 			fmt.Fprintf(&b, "\n## %s\n\n```\n%s\n```\n", d.Path, d.Content)
 		}
 	}
+	b.WriteString(c.Host)
 	if len(c.Observations) > 0 {
 		raw, _ := json.MarshalIndent(c.Observations, "", "  ")
 		b.WriteString("\n\n# Previous observations and human responses (settled; do not ask these again, apply the answers)\n\n")
@@ -711,6 +715,9 @@ func mergedConfig(live, changes json.RawMessage, agent config.Agent) ([]byte, er
 	}
 	if _, ok := patch["agents"]; ok {
 		return nil, errors.New("config_changes cannot set \"agents\"; the harness builds the worker entry from the proposed worker")
+	}
+	if _, ok := patch["commands"]; ok {
+		return nil, errors.New("config_changes cannot set \"commands\": only the operator decides which commands run without approval")
 	}
 	merged := mergePatch(base, patch)
 	merged["agents"] = map[string]any{agent.ID: agent}

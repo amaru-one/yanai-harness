@@ -129,8 +129,17 @@ type Config struct {
 	// Models is the operator's model catalog, by role category.
 	Models map[string]ModelCategory `json:"models,omitempty"`
 	Agents map[string]Agent         `json:"agents"`
+	// Commands holds the operator's command policy; only the operator edits
+	// it (a proposal's config_changes cannot).
+	Commands Commands `json:"commands,omitempty"`
 
 	path string
+}
+
+// Commands configures agent commands (run_command).
+type Commands struct {
+	// AutoApprove lists commands that run without asking the human.
+	AutoApprove []workflow.AutoApproveRule `json:"auto_approve,omitempty"`
 }
 
 // FileName is the workspace configuration file.
@@ -250,6 +259,11 @@ const (
 )
 
 func (c *Config) validate() error {
+	for _, rule := range c.Commands.AutoApprove {
+		if err := rule.Validate(); err != nil {
+			return fmt.Errorf("commands: %w", err)
+		}
+	}
 	if c.Orchestrator.MaxTokens < 0 || c.Orchestrator.MaxTokens > 10000000 || c.Orchestrator.MaxSteps < 0 || c.Orchestrator.MaxSteps > 1000 {
 		return fmt.Errorf("orchestrator max_tokens must be between 1 and 10000000 and max_steps between 1 and 1000")
 	}
@@ -399,7 +413,6 @@ func (c *Config) Agent(role string) (Agent, error) {
 }
 
 // APIKey reads the key from the configured environment variable.
-func (c *Config) APIKey() string { return os.Getenv(c.OpenRouter.APIKeyEnv) }
 
 // SetRepoPath updates just the binding, preserving model choices and unknown
 // fields from newer configurations. The caller supplies a validated absolute path.

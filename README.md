@@ -236,6 +236,30 @@ agent's reason, and resumes at the same step after a decision.
 ./yanai run --ws W                                       # or: ./yanai plan --ws W ticket.md
 ```
 
+`--run` records the decision and continues a worker's run in the same
+command (`yanai command --id C-… --approve --run`), and `--show [--tail N]`
+prints a command's exit code, changed files and output once it ran. The pause
+message shows the command's time limit; commands that start a server must run
+it detached and remove it themselves, and slow pulls or builds should ask for
+a longer `timeout_seconds` (macOS has no `timeout` program).
+
+Commands whose shape the operator trusts run without a pause. `commands.auto_approve`
+in `yanai.config.json` lists them, argument by argument (`*` matches any text
+within one argument, a final `"..."` any further arguments); a shell script
+(`bash -c`) never matches, except a syntax check (`bash -n FILE`). New workspaces
+start with read-only Docker queries and `bash -n`. A proposal cannot change this
+section. The agent's tool result says how each command was approved (`rule`,
+`always` or `once`), so it repeats "always" commands word for word.
+
+Agents also see a short summary of the host at the start of each run: operating
+system, which common tools are installed, Docker's version and the running
+containers.
+
+The OpenRouter key comes from the environment or, when unset, from a `.env`
+file in the workspace or next to the `yanai` binary (only that one variable is
+read). It is redacted from everything sent to a model. Commands that start
+while another yanai process holds the workspace wait up to ten seconds for it.
+
 A denial reaches the agent as an error with your note. A worker command that
 changes files hands them to the worker, who commits them with its own changes; a
 command that moves HEAD, changes the index or switches branch stops the run. A

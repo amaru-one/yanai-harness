@@ -51,7 +51,20 @@ const defaultConfig = `{
     "tools": {}
   },
   "models": {},
-  "agents": {}
+  "agents": {},
+  "commands": {
+    "auto_approve": [
+      {"args": ["docker", "ps", "..."], "description": "list containers"},
+      {"args": ["docker", "logs", "..."], "description": "read a container's logs"},
+      {"args": ["docker", "image", "ls", "..."], "description": "list images"},
+      {"args": ["docker", "version"], "description": "Docker version"},
+      {"args": ["docker", "info"], "description": "Docker status"},
+      {"args": ["docker", "compose", "-f", "*", "ps", "..."], "description": "list a Compose stack's services"},
+      {"args": ["docker", "compose", "-f", "*", "logs", "..."], "description": "read a Compose stack's logs"},
+      {"args": ["docker", "compose", "-f", "*", "config", "..."], "description": "validate a Compose file"},
+      {"args": ["bash", "-n", "*"], "description": "syntax-check a shell script without running it"}
+    ]
+  }
 }
 `
 

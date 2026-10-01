@@ -275,14 +275,18 @@ func (w *Workspace) CycleDir(n int) string {
 	return filepath.Join(w.CyclesDir(), fmt.Sprintf("%03d", n))
 }
 
+// LockWait is how long a command waits for another yanai process to release
+// the workspace before giving up.
+var LockWait = 10 * time.Second
+
 // LockWriter takes the workspace-level writer lock (workflow.lock). It
 // answers "is another yanai process using this workspace right now?" — the
 // repository writer lock (internal/repository) answers the same question
 // for the application checkout, a separate resource with its own lock.
 func (w *Workspace) LockWriter() (func(), error) {
-	unlock, err := lockfile.Lock(w.path("workflow.lock"))
+	unlock, err := lockfile.LockWait(w.path("workflow.lock"), LockWait)
 	if err != nil {
-		return nil, fmt.Errorf("another yanai process is already using this workspace: %w", err)
+		return nil, fmt.Errorf("another yanai process is using this workspace (for example a 'yanai run' still going); wait for it to finish, then try again: %w", err)
 	}
 	return unlock, nil
 }

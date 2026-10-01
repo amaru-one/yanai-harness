@@ -9,7 +9,7 @@ import (
 // storeSchemaVersion is the ladder this binary knows how to run. OpenStore
 // refuses a database stamped with a newer version: an old binary must never
 // guess at what a newer schema's columns mean.
-const storeSchemaVersion = 7
+const storeSchemaVersion = 8
 
 // migrations are applied in order, each in its own transaction, and never
 // rewritten once released — a later version only appends. Table DDL uses
@@ -263,6 +263,11 @@ CREATE TABLE workflow_command_requests (
  created_at TEXT NOT NULL, decided_at TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(project, cycle, id)
 );
+`,
+	// v8: a command request records its time limit, shown to the human who
+	// decides it.
+	`
+ALTER TABLE workflow_command_requests ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT 0;
 `,
 }
 

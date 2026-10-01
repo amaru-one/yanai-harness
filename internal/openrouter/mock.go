@@ -227,8 +227,12 @@ func mockWorkerTurn(turn int, msgs []Message, in MockInput) Message {
 	case "grep":
 		// YANAI_MOCK_COMMAND=1 adds one human-approved command that writes a
 		// file, to exercise the approval pause and the adoption of its change.
-		if os.Getenv("YANAI_MOCK_COMMAND") == "1" {
+		switch os.Getenv("YANAI_MOCK_COMMAND") {
+		case "1":
 			return call(turn, "run_command", map[string]any{"args": []string{"sh", "-c", "printf 'written by an approved command\\n' > yanai-mock-command.txt"}, "reason": "Mock: write a file with a shell command (YANAI_MOCK_COMMAND=1)."})
+		case "argv":
+			// A plain command without a shell, which an operator rule can pre-approve.
+			return call(turn, "run_command", map[string]any{"args": []string{"touch", "yanai-mock-command.txt"}, "reason": "Mock: create a file without a shell (YANAI_MOCK_COMMAND=argv).", "timeout_seconds": 30})
 		}
 		return call(turn, "read_file", map[string]any{"paths": []string{output}})
 	case "run_command":

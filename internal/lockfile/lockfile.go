@@ -8,9 +8,11 @@
 package lockfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 )
 
 // Lock takes an exclusive lock on path, creating it if necessary, and
@@ -28,4 +30,18 @@ func Lock(path string) (func(), error) {
 		return nil, fmt.Errorf("%s is already locked by another process: %w", path, err)
 	}
 	return func() { _ = f.Close() }, nil
+}
+
+// LockWait is Lock, retried every 200ms for up to wait while another process
+// holds the lock. A short command started right beside a long one (a
+// decision recorded while a run is still starting) waits instead of failing.
+func LockWait(path string, wait time.Duration) (func(), error) {
+	deadline := time.Now().Add(wait)
+	for {
+		unlock, err := Lock(path)
+		if err == nil || !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+			return unlock, err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }

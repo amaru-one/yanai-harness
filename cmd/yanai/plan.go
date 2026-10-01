@@ -1,13 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/yanai/yanai-harness/internal/team"
 	"github.com/yanai/yanai-harness/internal/workflow"
+	"github.com/yanai/yanai-harness/internal/ws"
 )
 
 func cmdPlan(args []string) error {
@@ -80,6 +83,9 @@ func cmdCommand(args []string) error {
 	deny := fs.Bool("deny", false, "refuse the command; --note tells the agent why")
 	always := fs.Bool("always", false, "with --approve: also run this exact command (same arguments and directory) without asking for the rest of the cycle")
 	note := fs.String("note", "", "a note for the agent (required with --deny)")
+	run := fs.Bool("run", false, "after deciding a worker's request, continue the run at once (like 'yanai run')")
+	show := fs.Bool("show", false, "with --id: show the request and, once it ran, its exit code and output")
+	tail := fs.Int("tail", 0, "with --show: only the last N lines of output")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -87,7 +93,14 @@ func cmdCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			cleanup()
+		}
+	}
+	defer release()
 	st, err := r.Workspace.LoadState()
 	if err != nil {
 		return err
@@ -107,13 +120,30 @@ func cmdCommand(args []string) error {
 		for _, c := range all {
 			printCommandRequest(c)
 		}
+		fmt.Println("\nOutput of a command that ran: yanai command --id C-... --show [--tail N]")
 		return nil
+	}
+	if *show {
+		return showCommand(r.Workspace, st.Cycle, *id, *tail)
 	}
 	if *approve == *deny {
 		return fmt.Errorf("choose exactly one of --approve or --deny")
 	}
+	request, err := r.Workspace.Store.Command(st.Cycle, *id)
+	if err != nil {
+		return fmt.Errorf("command request %s: %w", *id, err)
+	}
 	if err = r.Workspace.Store.DecideCommand(st.Cycle, *id, *approve, *always, *note); err != nil {
 		return err
+	}
+	if *run {
+		if request.Role == "parent" {
+			fmt.Println("Decision recorded. This request came from planning: continue with 'yanai plan <ticket.md>'.")
+			return nil
+		}
+		fmt.Println("Decision recorded; continuing the run.")
+		release() // the run takes the workspace lock itself
+		return runCycle(*path, false)
 	}
 	if *approve {
 		fmt.Println("Command approved. Continue with 'yanai run' (worker) or 'yanai plan <ticket.md>' (parent); the agent resumes at the same step.")
@@ -128,7 +158,11 @@ func printCommandRequest(c workflow.CommandRequest) {
 	if c.Always {
 		status += " (always)"
 	}
-	fmt.Printf("Command %s [%s] by %s in %s\n  %s\n  Reason: %s\n", c.ID, status, c.Role, c.Dir, strings.Join(c.Args, " "), c.Reason)
+	timeout := "timeout not recorded"
+	if c.Timeout > 0 {
+		timeout = fmt.Sprintf("timeout %ds", c.Timeout)
+	}
+	fmt.Printf("Command %s [%s] by %s in %s, %s\n  %s\n  Reason: %s\n", c.ID, status, c.Role, c.Dir, timeout, strings.Join(c.Args, " "), c.Reason)
 	if c.Note != "" {
 		fmt.Printf("  Note: %s\n", c.Note)
 	}
@@ -168,5 +202,63 @@ func cmdAmend(args []string) error {
 		return err
 	}
 	fmt.Printf("Cycle %03d: proposal amended; it needs a new review and approval.\nNext: yanai review, then yanai approve --contract TOKEN\n", st.Cycle)
+	return nil
+}
+
+// showCommand prints one request and, when it ran, its evidence: the worker's
+// executor artifact or the parent's agent-step artifact.
+func showCommand(w *ws.Workspace, cycle int, id string, tail int) error {
+	c, err := w.Store.Command(cycle, id)
+	if err != nil {
+		return fmt.Errorf("command request %s: %w", id, err)
+	}
+	printCommandRequest(c)
+	artifacts := workflow.ArtifactStore{Root: w.Root}
+	evidence := "command-" + id
+	if c.Role == "parent" {
+		evidence = fmt.Sprintf("agent-%s-%03d-command", c.Run, c.Seq)
+	}
+	raw, err := artifacts.Read(w.Store, cycle, evidence)
+	if err != nil {
+		if c.Status == workflow.CommandApproved {
+			fmt.Println("  Result: not recorded yet (the run has not reached it, or it was interrupted)")
+		}
+		return nil
+	}
+	var res struct {
+		ExitCode   int       `json:"exit_code"`
+		TimedOut   bool      `json:"timed_out"`
+		Truncated  bool      `json:"truncated"`
+		Error      string    `json:"error"`
+		Changed    []string  `json:"changed"`
+		Output     string    `json:"output"`
+		StartedAt  time.Time `json:"started_at"`
+		FinishedAt time.Time `json:"finished_at"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return err
+	}
+	fmt.Printf("  Result: exit %d in %s", res.ExitCode, res.FinishedAt.Sub(res.StartedAt).Round(100*time.Millisecond))
+	if res.TimedOut {
+		fmt.Print(", TIMED OUT")
+	}
+	if res.Truncated {
+		fmt.Print(", output truncated")
+	}
+	fmt.Println()
+	if res.Error != "" {
+		fmt.Printf("  Error: %s\n", res.Error)
+	}
+	if len(res.Changed) > 0 {
+		fmt.Printf("  Changed files: %s\n", strings.Join(res.Changed, ", "))
+	}
+	output := strings.TrimRight(res.Output, "\n")
+	if tail > 0 {
+		lines := strings.Split(output, "\n")
+		if len(lines) > tail {
+			output = strings.Join(lines[len(lines)-tail:], "\n")
+		}
+	}
+	fmt.Printf("  Output:\n%s\n", output)
 	return nil
 }

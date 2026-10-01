@@ -299,6 +299,11 @@ func openWorkspace(path string) (*team.Runner, func(), error) {
 		fmt.Fprintln(os.Stderr, "⚠  YANAI_MOCK=1: mock responses, OpenRouter is not being called.")
 	}
 	r.Client = cli
+	// The key never reaches a model: a human-approved command could print a
+	// .env file, and every tool result passes through this redaction.
+	if key := r.Cfg.APIKey(); key != "" {
+		r.Secrets = append(r.Secrets, key)
+	}
 	return r, cleanup, nil
 }
 
@@ -702,7 +707,13 @@ func cmdRun(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	r, cleanup, err := openWorkspace(*path)
+	return runCycle(*path, *retryUnresolved)
+}
+
+// runCycle runs the approved worker (or finishes closing) and prints where
+// things stand; 'yanai run' and 'yanai command --run' share it.
+func runCycle(path string, retryUnresolved bool) error {
+	r, cleanup, err := openWorkspace(path)
 	if err != nil {
 		return err
 	}
@@ -710,7 +721,7 @@ func cmdRun(args []string) error {
 	ctx, cancel := withContext()
 	defer cancel()
 
-	st, err := r.Execute(ctx, *retryUnresolved)
+	st, err := r.Execute(ctx, retryUnresolved)
 	if st != nil {
 		printTasks(st)
 		fmt.Printf("\nCheckout:  %s\nEvidence:  %s\n", r.Cfg.Repo.Path, r.Workspace.CycleDir(st.Cycle))

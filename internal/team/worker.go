@@ -306,7 +306,7 @@ func (r *Runner) runWorker(ctx context.Context, st *ws.State, c workflow.Executi
 	run := agentRun{
 		Key: runKey, Role: terms.Worker.ID, Bucket: workflow.BucketWorker, Model: terms.Worker.Model, Temperature: terms.Worker.Temperature,
 		MaxTokens: terms.Worker.MaxTokens, MaxSteps: terms.Worker.MaxSteps, Policy: c.Policy,
-		System:  system.Content + "\n\n" + fmt.Sprintf(workerProtocol, terms.TicketBranch, strings.Join(task.Evidence, ", "), terms.TicketType, terms.CommitScope, terms.Slug, terms.Worker.ID),
+		System:  system.Content + "\n\n" + fmt.Sprintf(workerProtocol, terms.TicketBranch, strings.Join(task.Evidence, ", "), terms.TicketType, terms.CommitScope, terms.Slug, terms.Worker.ID) + "\n\n" + commandGuidance(r.Cfg.Commands.AutoApprove),
 		Initial: initial, Tools: workerTools(), Final: "finish", Reasoning: approvedReasoningCap(terms), Retry: retry,
 		Execute: func(ctx context.Context, step workflow.AgentStep, mark func(any) error) (toolOutcome, error) {
 			if step.ToolName == "run_command" {
@@ -336,7 +336,7 @@ func (r *Runner) runWorker(ctx context.Context, st *ws.State, c workflow.Executi
 
 // workerCommand runs a run_command step once the human approved it.
 func (r *Runner) workerCommand(ctx context.Context, cycle int, run agentRun, backend *executor.Native, state *workerState, step workflow.AgentStep, mark func(any) error) (toolOutcome, error) {
-	req, outcome, err := r.commandGate(cycle, run, step, "yanai run --ws "+r.Workspace.Root)
+	req, request, outcome, err := r.commandGate(cycle, run, step, "yanai run --ws "+r.Workspace.Root)
 	if err != nil || outcome != nil {
 		if outcome != nil {
 			return *outcome, nil
@@ -355,7 +355,7 @@ func (r *Runner) workerCommand(ctx context.Context, cycle int, run agentRun, bac
 	if err != nil {
 		return toolError("%v", err), nil
 	}
-	result := commandOutcome(res)
+	result := commandOutcome(res, request)
 	state.observe(step.ToolName, encodeResult(result))
 	return result, nil
 }
@@ -436,6 +436,11 @@ func (r *Runner) workerInput(st *ws.State, c workflow.ExecutionContract, backend
 		return "", err
 	}
 	b.WriteString(preloaded)
+	host, err := r.hostSection(context.Background(), st.Cycle, runKey)
+	if err != nil {
+		return "", err
+	}
+	b.WriteString(host)
 	if session, found, err := backend.GitSession(); err == nil && found && len(session.Commits) > 0 {
 		b.WriteString("\n# Existing commits on the ticket branch\n")
 		for _, commit := range session.Commits {

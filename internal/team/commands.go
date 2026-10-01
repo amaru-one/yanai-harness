@@ -2,7 +2,9 @@ package team
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -32,11 +34,13 @@ func (e *AwaitingCommand) Error() string {
 	return fmt.Sprintf(`awaiting command approval %s
   agent:   %s
   dir:     %s
+  timeout: %ds
   command: %s
   reason:  %s
-Approve: yanai command --ws %s --id %s --approve   (add --always to allow this exact command for the rest of the cycle)
-Deny:    yanai command --ws %s --id %s --deny --note "why, and what to do instead"
-Then continue with: %s`, c.ID, c.Role, c.Dir, quoteArgs(c.Args), c.Reason, e.Workspace, c.ID, e.Workspace, c.ID, e.Resume)
+Approve: yanai command --ws %s --id %s --approve --run   (add --always to allow this exact command for the rest of the cycle)
+Deny:    yanai command --ws %s --id %s --deny --note "why, and what to do instead" --run
+Output of earlier commands: yanai command --ws %s --id C-... --show
+Without --run, continue with: %s`, c.ID, c.Role, c.Dir, c.Timeout, quoteArgs(c.Args), c.Reason, e.Workspace, c.ID, e.Workspace, c.ID, e.Workspace, e.Resume)
 }
 
 // quoteArgs renders a command for a human, quoting arguments with spaces.
@@ -56,40 +60,52 @@ func quoteArgs(args []string) string {
 // run now. It returns a tool outcome instead when the arguments are invalid,
 // the human denied the command, or an earlier run was interrupted while the
 // command ran; and an *AwaitingCommand error while the decision is pending.
-func (r *Runner) commandGate(cycle int, run agentRun, step workflow.AgentStep, resume string) (orchestrator.CommandRequest, *toolOutcome, error) {
+func (r *Runner) commandGate(cycle int, run agentRun, step workflow.AgentStep, resume string) (orchestrator.CommandRequest, workflow.CommandRequest, *toolOutcome, error) {
 	req, err := orchestrator.ParseCommand(string(step.Arguments))
 	if err != nil {
 		outcome := toolError("%v", err)
-		return req, &outcome, nil
+		return req, workflow.CommandRequest{}, &outcome, nil
 	}
 	if step.State == workflow.StepIntent {
 		// The process died after the command started; its effect is unknown
 		// and an approved command is never repeated behind the human's back.
 		outcome := toolError("this command was started but the run was interrupted before it finished; its outcome is unknown. Inspect the repository with read_file/grep, or ask for the command again")
-		return req, &outcome, nil
+		return req, workflow.CommandRequest{}, &outcome, nil
 	}
-	request, err := r.Workspace.Store.RequestCommand(cycle, run.Key, step.Seq, run.Role, req.Args, req.Dir, req.Reason)
+	request, err := r.Workspace.Store.RequestCommand(cycle, run.Key, step.Seq, run.Role, req.Args, req.Dir, req.Reason, req.TimeoutSeconds, r.Cfg.Commands.AutoApprove)
 	if err != nil {
-		return req, nil, err
+		return req, request, nil, err
 	}
 	switch request.Status {
 	case workflow.CommandApproved:
-		return req, nil, nil
+		return req, request, nil, nil
 	case workflow.CommandDenied:
 		outcome := toolError("the human denied this command: %s", request.Note)
-		return req, &outcome, nil
+		return req, request, &outcome, nil
 	}
-	return req, nil, &AwaitingCommand{Request: request, Workspace: r.Workspace.Root, Resume: resume}
+	return req, request, nil, &AwaitingCommand{Request: request, Workspace: r.Workspace.Root, Resume: resume}
+}
+
+// approvalNote tells the agent how its command was approved, so it knows
+// which commands it can repeat without waiting for a human.
+func approvalNote(request workflow.CommandRequest) string {
+	switch {
+	case request.Always || strings.HasPrefix(request.Note, "approved always"):
+		return "always: this exact command (same args and dir) runs again without asking; repeat it verbatim"
+	case strings.HasPrefix(request.Note, "auto-approved by rule"):
+		return "rule: " + strings.TrimPrefix(request.Note, "auto-approved by rule: ") + " (commands of this shape run without asking)"
+	}
+	return "once: the human approved this run only; a changed command needs a new approval"
 }
 
 // commandOutcome is what the agent sees of a finished command.
-func commandOutcome(res executor.CommandResult) toolOutcome {
+func commandOutcome(res executor.CommandResult, request workflow.CommandRequest) toolOutcome {
 	output := res.Output
 	if len(output) > maxCommandOutput {
 		head, tail := output[:maxCommandOutput/5], output[len(output)-maxCommandOutput*4/5:]
 		output = fmt.Sprintf("%s\n[... %d bytes omitted ...]\n%s", head, len(res.Output)-len(head)-len(tail), tail)
 	}
-	result := map[string]any{"exit_code": res.ExitCode, "output": output}
+	result := map[string]any{"exit_code": res.ExitCode, "output": output, "approval": approvalNote(request)}
 	if res.TimedOut {
 		result["timed_out"] = true
 	}
@@ -109,7 +125,7 @@ func commandOutcome(res executor.CommandResult) toolOutcome {
 // Planning must not change the repository it plans against: a command that
 // changes any file stops planning until the human restores it.
 func (r *Runner) parentCommand(ctx context.Context, cycle int, run agentRun, target *repository.Target, step workflow.AgentStep, mark func(any) error, resume string) (toolOutcome, error) {
-	req, outcome, err := r.commandGate(cycle, run, step, resume)
+	req, request, outcome, err := r.commandGate(cycle, run, step, resume)
 	if err != nil || outcome != nil {
 		if outcome != nil {
 			return *outcome, nil
@@ -147,5 +163,48 @@ func (r *Runner) parentCommand(ctx context.Context, cycle int, run agentRun, tar
 	if after.Baseline() != before.Baseline() {
 		return toolOutcome{}, fmt.Errorf("planning command %s changed the repository (%s); planning never modifies the checkout. Restore it, then run 'yanai plan' again", id, strings.Join(res.Changed, ", "))
 	}
-	return commandOutcome(res), nil
+	return commandOutcome(res, request), nil
+}
+
+// commandGuidance is the part of an agent's system prompt about writing
+// commands: how to keep them self-contained, and which ones run without a
+// human because the operator pre-approved their shape.
+func commandGuidance(rules []workflow.AutoApproveRule) string {
+	var b strings.Builder
+	b.WriteString(`COMMANDS (run_command):
+- A command must end on its own. Start a server or other long-running process only detached (for example "docker run -d --name probe ...") and remove it in the same command ("...; docker rm -f probe"); never leave containers or processes behind.
+- Never rely on a host "timeout" program (macOS has none): set timeout_seconds instead. Image pulls and builds need 300 to 900 seconds; quick queries need the default 120 or less.
+- Print summaries, not raw dumps: every turn resends the whole conversation, so filter large JSON or logs before they reach you.
+- The result's "approval" field says how the command was approved. A command approved "always" runs again without asking only if you repeat it exactly (same args and dir).
+`)
+	if len(rules) == 0 {
+		b.WriteString("- Every command needs a human's approval: prefer the built-in tools and approved checks.\n")
+		return b.String()
+	}
+	b.WriteString("- These commands run immediately, without waiting for a human, when written WITHOUT a shell (plain args, not bash -c) and matching the pattern (\"*\" matches within one argument, a final \"...\" any further arguments):\n")
+	for _, rule := range rules {
+		fmt.Fprintf(&b, "  - %s: %s\n", strings.Join(rule.Args, " "), rule.Description)
+	}
+	b.WriteString("- Anything else, including any bash -c, waits for a human.\n")
+	return b.String()
+}
+
+// hostSection is the "Host environment" section of an agent's first
+// message. It is computed once per agent run and published, so a resumed run
+// replays exactly the message the agent first saw.
+func (r *Runner) hostSection(ctx context.Context, cycle int, runKey string) (string, error) {
+	store := r.Workspace.Store
+	artifacts := workflow.ArtifactStore{Root: r.Workspace.Root}
+	ref := workflow.ArtifactRef{ID: "host-" + runKey, Path: fmt.Sprintf("cycles/%03d/agents/%s/host.md", cycle, runKey), Version: "1", Media: "text/markdown"}
+	if _, err := store.GetArtifact(cycle, ref.ID); err == nil {
+		data, err := artifacts.Read(store, cycle, ref.ID)
+		return string(data), err
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	text := "\n# Host environment (at run start)\n\nCommands run on this machine. Check the current state with a command when it matters.\n\n" + executor.HostSummary(ctx)
+	if _, err := artifacts.Publish(store, cycle, ref, []byte(text)); err != nil {
+		return "", err
+	}
+	return text, nil
 }

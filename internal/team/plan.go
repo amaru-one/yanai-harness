@@ -130,6 +130,9 @@ func (r *Runner) Plan(ctx context.Context, raw string, retry bool) (*ws.State, e
 		readBytes += len(data)
 		pc.AlreadyRead = append(pc.AlreadyRead, ws.Document{Path: path, Content: string(data), SHA256: workflow.Digest(string(data))})
 	}
+	if pc.Host, err = r.hostSection(ctx, st.Cycle, runKey); err != nil {
+		return st, err
+	}
 	initial, err := orchestrator.PlanningMessage(pc, ws.GeneratedPromptsDir+"/"+ticket.Slug+"/")
 	if err != nil {
 		return st, err
@@ -152,7 +155,7 @@ func (r *Runner) Plan(ctx context.Context, raw string, retry bool) (*ws.State, e
 	run := agentRun{
 		Key: runKey, Role: parentRole, Bucket: workflow.BucketParent, Model: parent.Model, Temperature: parent.Temperature,
 		MaxTokens: parent.MaxTokens, MaxSteps: parent.MaxSteps, Policy: parent.Budget.Policy(),
-		System: orchestrator.PlanningSystem(), Initial: initial, Tools: orchestrator.PlanningTools(pc.BasePrompts), Final: "submit_proposal", Retry: retry,
+		System: orchestrator.PlanningSystem() + "\n\n" + commandGuidance(r.Cfg.Commands.AutoApprove), Initial: initial, Tools: orchestrator.PlanningTools(pc.BasePrompts), Final: "submit_proposal", Retry: retry,
 		Execute: func(ctx context.Context, step workflow.AgentStep, mark func(any) error) (toolOutcome, error) {
 			switch step.ToolName {
 			case "read_file":
